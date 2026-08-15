@@ -4,6 +4,25 @@
 [`../pgbaga`](../pgbaga/README.md). Same session can target **PostgreSQL** or
 **boilaDB** (PG wire) via [`../boilabaga`](../boilabaga/README.md).
 
+This repository is the package. The compiler, `std`, `pgbaga`, and
+`boilabaga` stay in the baga language monorepo. Check this tree out as
+`app-product/ormbaga` there (git submodule) so path deps and
+`-I app-product` keep working.
+
+## Checkout
+
+Inside a baga language clone:
+
+```bash
+git submodule update --init --recursive
+# or, first time from a fresh baga tree without the submodule recorded:
+git clone git@github.com:bagalang/ormbaga.git app-product/ormbaga
+```
+
+`sandak.toml` keeps path deps (`../../std`, `../pgbaga`, `../boilabaga`).
+`fmrbaga`, `oauthbaga`, `apps/api`, and `apps/registry` still depend on
+this path. Tests (`orm_test`, `orm_boila_test`) stay in baga.
+
 Architecture: [`ARCHITECTURE.md`](ARCHITECTURE.md).
 
 ## Layers
