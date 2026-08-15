@@ -176,3 +176,7 @@ fmrbaga routes → ormbaga session → pgbaga → PostgreSQL
                      │               ↑ migrations at boot
                      └→ boilabaga → pgbaga → boilaDB :6575
 ```
+
+## License
+
+[MIT](LICENSE) — Copyright (c) 2026 Dim Gigov.
