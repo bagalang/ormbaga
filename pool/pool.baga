@@ -122,6 +122,9 @@ fn orm_pool_conn_at(pool: OrmPool, slot: i64) -> PgConn {
     // Reader is rebuilt on acquire: parallel Vecs cannot hold the PgReader
     // struct, and release leaves the socket drained at ReadyForQuery, so no
     // residual bytes are lost across checkin/checkout.
+    // Honest limit: the pool stores no TLS state — pooled sessions are
+    // plaintext (PGSSLMODE off); a negotiated TLS transport would not
+    // survive checkin/checkout.
     let fd = vec_get(pool.fds, slot)
     return PgConn {
         fd: fd,
@@ -131,7 +134,9 @@ fn orm_pool_conn_at(pool: OrmPool, slot: i64) -> PgConn {
         key: pg_empty(),
         tx_status: vec_get(pool.txs, slot),
         server_version: vec_get(pool.versions, slot),
-        reader: pg_reader(fd)
+        reader: pg_reader(fd),
+        tls: 0,
+        tconn: tls_conn_bad("")
     }
 }
 
