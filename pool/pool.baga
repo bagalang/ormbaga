@@ -15,6 +15,12 @@ import "std/str/str.baga"
 struct OrmPool {
     free_ch: i64,       // channel of free slot indices
     n: i64,
+    // connect params kept for self-heal (broken sessions reconnect on acquire)
+    host: str,
+    port: i64,
+    user: str,
+    password: str,
+    database: str,
     fds: Vec<i64>,
     oks: Vec<i64>,
     pids: Vec<i64>,
@@ -40,6 +46,11 @@ fn orm_pool_empty() -> OrmPool {
     return OrmPool {
         free_ch: 0,
         n: 0,
+        host: "",
+        port: 0,
+        user: "",
+        password: "",
+        database: "",
         fds: vec_new(),
         oks: vec_new(),
         pids: vec_new(),
@@ -80,6 +91,11 @@ fn orm_pool_new(host: str, port: i64, user: str, password: str, database: str, s
     let pool = OrmPool {
         free_ch: ch,
         n: n,
+        host: host,
+        port: port,
+        user: user,
+        password: password,
+        database: database,
         fds: fds,
         oks: oks,
         pids: pids,
@@ -140,9 +156,26 @@ fn orm_pool_conn_at(pool: OrmPool, slot: i64) -> PgConn {
     }
 }
 
+// Self-heal one slot: reconnect when the stored session is broken (ok != 1).
+// Writes back into the pool's parallel vecs (shared heap, visible to callers).
+fn orm_pool_heal(pool: OrmPool, slot: i64) -> i64 !Net !IO !Random {
+    let c = pg_connect(pool.host, pool.port, pool.user, pool.password, pool.database)?
+    vec_set(pool.fds, slot, c.fd)
+    vec_set(pool.oks, slot, c.ok)
+    vec_set(pool.pids, slot, c.pid)
+    vec_set(pool.txs, slot, c.tx_status)
+    vec_set_str(pool.errs, slot, c.err)
+    vec_set_str(pool.versions, slot, c.server_version)
+    return c.ok
+}
+
 // Acquire a session (blocks). Returns lease; check lease.db.conn.ok.
-fn orm_pool_acquire(pool: OrmPool) -> OrmLease !Par {
+// Broken pooled sessions are reconnected before checkout (self-heal).
+fn orm_pool_acquire(pool: OrmPool) -> OrmLease !Par !Net !IO !Random {
     let slot = chan_recv(pool.free_ch)
+    if vec_get(pool.oks, slot) != 1 {
+        orm_pool_heal(pool, slot)?
+    }
     let c = orm_pool_conn_at(pool, slot)
     return OrmLease {
         db: orm_from_conn(c),
@@ -163,7 +196,7 @@ struct OrmTryLease {
     lease: OrmLease
 }
 
-fn orm_pool_try_acquire(pool: OrmPool) -> OrmTryLease !Par {
+fn orm_pool_try_acquire(pool: OrmPool) -> OrmTryLease !Par !Net !IO !Random {
     let empty = OrmLease {
         db: orm_db_bad(""),
         slot: 0,
@@ -177,6 +210,9 @@ fn orm_pool_try_acquire(pool: OrmPool) -> OrmTryLease !Par {
         return OrmTryLease { ok: st, lease: empty }
     }
     let slot = cell2_1(t)
+    if vec_get(pool.oks, slot) != 1 {
+        orm_pool_heal(pool, slot)?
+    }
     let c = orm_pool_conn_at(pool, slot)
     return OrmTryLease {
         ok: 1,

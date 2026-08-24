@@ -89,6 +89,25 @@ Apps that need FK/SERIAL stay on real Postgres.
 
 **Verdict.** Expected; boilabaga documents the subset.
 
+## G10 — Migration hardening round 2 — **closed 2026-08-24**
+
+- **Staged up.** `migrate_up_steps(db, set, steps)` applies at most N
+  pending versions (0 = all); `migrate_up` delegates to it.
+- **Out-of-order guard.** A pending version below the highest applied one
+  aborts `migrate_up` (`out-of-order migration version N`) — sets edited
+  after deploy cannot silently reorder history.
+- **Pending report.** `migrate_pending(db, set)` returns count + next
+  version in one history fetch; readiness checks use `count == 0`.
+- **NULL-capable typed paths.** `orm_insert_full` /
+  `orm_insert_returning_full` / `orm_update_by_id_full` bind SQL NULL per
+  column (`nulls[i] == 1`); length mismatch is fail-loud.
+- **Pool self-heal.** `OrmPool` keeps its connect params; `acquire` /
+  `try_acquire` reconnect broken sessions before checkout (server
+  restarts / idle kills no longer hand out dead connections).
+
+Covered live: `tests/orm_test.baga` (Postgres) and
+`tests/orm_boila_test.baga` (serve_pg), 2026-08-24.
+
 ## Live check (2026-08-13)
 
 `tests/orm_boila_test.baga` срещу `serve_pg` — **36/36** (клиент и

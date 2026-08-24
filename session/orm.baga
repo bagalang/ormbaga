@@ -373,6 +373,23 @@ fn orm_insert_returning_strs(db: OrmDb, table: str, cols: Vec<str>, vals: Vec<st
     return orm_query_params_str(db, sql_insert_returning_p(table, cols), vals)?
 }
 
+// INSERT with per-column NULL flags: nulls[i]==1 binds SQL NULL for column i.
+// All three vectors must have equal length (fail-loud, not silent truncation).
+fn orm_insert_full(db: OrmDb, table: str, cols: Vec<str>, vals: Vec<str>, nulls: Vec<i64>) -> OrmExec !IO !Net {
+    if vec_len(cols) != vec_len(vals) || vec_len(cols) != vec_len(nulls) {
+        return OrmEErr(OrmExecFail { err: "orm_insert_full: cols/vals/nulls length mismatch", tag: "", db: db })
+    }
+    return orm_exec_params(db, sql_insert_p(table, cols), vals, nulls)?
+}
+
+// INSERT … RETURNING * with per-column NULL flags (same rules as above).
+fn orm_insert_returning_full(db: OrmDb, table: str, cols: Vec<str>, vals: Vec<str>, nulls: Vec<i64>) -> OrmQuery !IO !Net {
+    if vec_len(cols) != vec_len(vals) || vec_len(cols) != vec_len(nulls) {
+        return OrmQErr(OrmQueryFail { err: "orm_insert_returning_full: cols/vals/nulls length mismatch", tag: "", db: db })
+    }
+    return orm_query_params(db, sql_insert_returning_p(table, cols), vals, nulls)?
+}
+
 // Legacy: pre-quoted lits via Simple Query
 fn orm_insert_lits(db: OrmDb, table: str, cols: Vec<str>, lits: Vec<str>) -> OrmExec !IO !Net {
     return orm_exec(db, sql_insert(table, cols, lits))?
@@ -400,6 +417,22 @@ fn orm_update_by_id(db: OrmDb, table: str, id: i64, set_cols: Vec<str>, set_vals
     for i in 0..vec_len(set_vals) {
         vec_push(vals, vec_get(set_vals, i))
         vec_push(nulls, 0)
+    }
+    pg_param_i64(vals, nulls, id)
+    return orm_exec_params(db, sql, vals, nulls)?
+}
+
+// UPDATE by id with per-column NULL flags (set_nulls[i]==1 → SET col = NULL).
+fn orm_update_by_id_full(db: OrmDb, table: str, id: i64, set_cols: Vec<str>, set_vals: Vec<str>, set_nulls: Vec<i64>) -> OrmExec !IO !Net {
+    if vec_len(set_cols) != vec_len(set_vals) || vec_len(set_cols) != vec_len(set_nulls) {
+        return OrmEErr(OrmExecFail { err: "orm_update_by_id_full: set_cols/set_vals/set_nulls length mismatch", tag: "", db: db })
+    }
+    let sql = sql_update_eq_p(table, set_cols, "id")
+    let vals = vec_new()
+    let nulls = vec_new()
+    for i in 0..vec_len(set_vals) {
+        vec_push(vals, vec_get(set_vals, i))
+        vec_push(nulls, vec_get(set_nulls, i))
     }
     pg_param_i64(vals, nulls, id)
     return orm_exec_params(db, sql, vals, nulls)?

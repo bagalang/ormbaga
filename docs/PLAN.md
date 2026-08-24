@@ -71,6 +71,10 @@ Rows stay as pgbaga cells (`orm_cell_by`) — no codegen struct mapping.
   (клиент и сървър с и без `--rc`); `demo_boila` migrate+CRUD;
   `orm_test` (Postgres) all passed. Резултат:
   `bench/boila/results/orm-boila-2026-08-13.md`.
+- **P2.4 (2026-08-24):** migration hardening round 2 — `migrate_up_steps`
+  (staged up), out-of-order guard, `migrate_pending`; NULL-capable typed
+  paths (`orm_insert_full` / `orm_insert_returning_full` /
+  `orm_update_by_id_full`); pool self-heal (reconnect on acquire) ✅
 
 ## Success criteria
 

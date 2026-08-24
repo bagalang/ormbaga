@@ -53,14 +53,17 @@ let mut set = migrate_set_new()
 set = migrate_add(set, 20260803001, "create_users", up_sql, down_sql)
 // Migration { version, name, up, down } — one Vec, not four
 // …
-let r = migrate_up(db, set)?        // pending only, each in a transaction
-db = migrate_db(r)                  // always rebind (by-value structs)
-let n = migrate_applied_n(r)        // how many versions ran this call
-let d = migrate_down(db, set, 1)?   // rollback last N
+let r = migrate_up(db, set)?          // pending only, each in a transaction
+db = migrate_db(r)                    // always rebind (by-value structs)
+let n = migrate_applied_n(r)          // how many versions ran this call
+let s = migrate_up_steps(db, set, 2)? // staged: at most 2 pending (0 = all)
+let d = migrate_down(db, set, 1)?     // rollback last N
 db = migrate_db(d)
 
 let cur = migrate_current(db)?          // highest applied version (0 = empty)
 db = orm_db_c(cur)
+let pend = migrate_pending(db, set)?    // count + next version (0/0 = at head)
+db = pend.db
 let st = migrate_status_text(db, set)?  // "ver name [applied|pending]" lines
 db = st.db                              // report keeps your session
 ```
@@ -68,6 +71,9 @@ db = st.db                              // report keeps your session
 Registry is **embedded** (parallel `Vec`s — Baga has no `Vec<struct>`).
 Duplicate versions in a set are rejected before any SQL runs; applied
 versions are fetched once per `migrate_up` and checked in memory.
+**Fail-loud:** a pending version below the highest applied one (set edited
+after deploy) aborts `migrate_up` as out-of-order instead of corrupting
+history.
 
 ## ORM API
 
@@ -96,6 +102,11 @@ let u = orm_update_by_id(db, "users", id, set_cols, set_lits)?
 let d = orm_delete_by_id(db, "users", id)?
 let c = orm_count(db, "users")?
 let p = orm_ping(db)?
+
+// NULL-capable paths (nullable columns):
+// orm_insert_full / orm_insert_returning_full(db, table, cols, vals, nulls)
+// orm_update_by_id_full(db, table, id, set_cols, set_vals, set_nulls)
+// nulls[i] == 1 binds SQL NULL; length mismatch is a fail-loud error.
 ```
 
 Always rebind `db = result.db` (by-value structs — same as pgbaga).
@@ -139,7 +150,8 @@ target boilaDB; default is Postgres (`PG*`).
 ## Parameterized queries (default)
 
 `orm_find_*`, `orm_where_eq_*`, `orm_insert_strs`, `orm_insert_returning_strs`,
-`orm_update_by_id`, `orm_delete_by_id` use **Extended Query** (`$1..$n`) via
+`orm_insert_full`, `orm_update_by_id`, `orm_update_by_id_full`,
+`orm_delete_by_id` use **Extended Query** (`$1..$n`) via
 pgbaga — values are bound, not concatenated.
 
 Legacy `orm_*_lit` / `sql_lit` paths remain for migrations and trusted SQL.
@@ -158,6 +170,9 @@ orm_pool_close(pool)?
 orm_prepare(db, "user_by_id", "SELECT * FROM users WHERE id=$1", 1)?
 orm_query_prepared_str(db, "user_by_id", ids)?
 ```
+
+Broken pooled sessions (server restarts, idle kill) **reconnect on acquire** —
+the pool keeps its connect params and self-heals before checkout.
 
 HTTP servers should prefer **`FMR_WORKERS=N`** (one DB per worker).
 
