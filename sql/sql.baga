@@ -6,19 +6,21 @@ import "std/str/str.baga"
 import "std/json/json.baga"
 import "std/json/json_write.baga"
 import "std/json/json_strict.baga"
+import "bufbaga/buf.baga"
 
 // Escape a string literal for PostgreSQL: wrap in '...' and double internal quotes.
 fn sql_lit(s: str) -> str {
-    let mut out = "'"
+    let mut out = buf_from("'")
     for i in 0..len(s) {
         let c = char_at(s, i)
-        if c == 39 {   // '
-            out = concat(out, "''")
+        if c == 39 {
+            out = buf_push(out, "''")
         } else {
-            out = concat(out, chr(c))
+            out = buf_push_chr(out, c)
         }
     }
-    return concat(out, "'")
+    out = buf_push_chr(out, 39)
+    return buf_str(out)
 }
 
 // NULL literal (for optional values).
@@ -59,19 +61,27 @@ fn sql_ident(name: str) -> str {
     if len(name) == 0 {
         return ""
     }
+    let mut i0: i64 = 0
+    while i0 < len(name) {
+        if char_at(name, i0) == 0 {
+            return ""
+        }
+        i0 = i0 + 1
+    }
     if sql_ident_is_bare(name) == 1 {
         return name
     }
-    let mut out = "\""
+    let mut out = buf_from("\"")
     for i in 0..len(name) {
         let c = char_at(name, i)
-        if c == 34 {   // "
-            out = concat(out, "\"\"")
+        if c == 34 {
+            out = buf_push(out, "\"\"")
         } else {
-            out = concat(out, chr(c))
+            out = buf_push_chr(out, c)
         }
     }
-    return concat(out, "\"")
+    out = buf_push_chr(out, 34)
+    return buf_str(out)
 }
 
 // Always double-quote (Postgres-only path when reserved words needed).
@@ -79,16 +89,24 @@ fn sql_ident_q(name: str) -> str {
     if len(name) == 0 {
         return ""
     }
-    let mut out = "\""
+    let mut i0: i64 = 0
+    while i0 < len(name) {
+        if char_at(name, i0) == 0 {
+            return ""
+        }
+        i0 = i0 + 1
+    }
+    let mut out = buf_from("\"")
     for i in 0..len(name) {
         let c = char_at(name, i)
         if c == 34 {
-            out = concat(out, "\"\"")
+            out = buf_push(out, "\"\"")
         } else {
-            out = concat(out, chr(c))
+            out = buf_push_chr(out, c)
         }
     }
-    return concat(out, "\"")
+    out = buf_push_chr(out, 34)
+    return buf_str(out)
 }
 
 // table.column
@@ -98,26 +116,30 @@ fn sql_qual(table: str, col: str) -> str {
 
 // Join quoted identifiers with ", ".
 fn sql_ident_list(names: Vec<str>) -> str {
-    let mut out = ""
+    let mut out = buf_new()
     for i in 0..vec_len(names) {
-        if i > 0 {
-            out = concat(out, ", ")
+        let id = sql_ident(vec_get(names, i))
+        if id == "" {
+            return ""
         }
-        out = concat(out, sql_ident(vec_get(names, i)))
+        if i > 0 {
+            out = buf_push(out, ", ")
+        }
+        out = buf_push(out, id)
     }
-    return out
+    return buf_str(out)
 }
 
 // Join already-built SQL fragments with ", " (literals or expressions).
 fn sql_join(parts: Vec<str>, sep: str) -> str {
-    let mut out = ""
+    let mut out = buf_new()
     for i in 0..vec_len(parts) {
         if i > 0 {
-            out = concat(out, sep)
+            out = buf_push(out, sep)
         }
-        out = concat(out, vec_get(parts, i))
+        out = buf_push(out, vec_get(parts, i))
     }
-    return out
+    return buf_str(out)
 }
 
 // Build VALUES (lit1, lit2, ...) from a list of already-quoted pieces.
@@ -127,25 +149,7 @@ fn sql_values_row(lits: Vec<str>) -> str {
 
 // i64 as SQL integer literal (no quotes).
 fn sql_i64(n: i64) -> str {
-    if n == 0 {
-        return "0"
-    }
-    let mut v = n
-    let mut neg: i64 = 0
-    if v < 0 {
-        neg = 1
-        v = 0 - v
-    }
-    let mut out = ""
-    while v > 0 {
-        let d = v % 10
-        out = concat(chr(48 + d), out)
-        v = v / 10
-    }
-    if neg == 1 {
-        out = concat("-", out)
-    }
-    return out
+    return int_to_str(n)
 }
 
 // bool as TRUE/FALSE.

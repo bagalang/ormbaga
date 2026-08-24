@@ -61,6 +61,11 @@ through Simple Query unchanged. `\n` escapes remain available.
 **Now.** `orm_insert_returning_strs` / `orm_insert_returning_lits` +
 `sql_insert_returning_p`. Covered in `tests/orm_test.baga`.
 
+## G9 — SQL builders nested concat / empty idents — **closed 2026-08-24**
+
+`sql_lit` / `sql_ident` / `sql_ident_q` / `sql_ident_list` / `sql_join`
+use `bufbaga`. Empty or NUL names → `""`. `sql_i64` is `int_to_str`.
+
 ## Closed / fine
 
 - goose history table + transactional up/down verified in `tests/orm_test.baga`.
