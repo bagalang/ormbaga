@@ -75,6 +75,9 @@ Rows stay as pgbaga cells (`orm_cell_by`) — no codegen struct mapping.
   (staged up), out-of-order guard, `migrate_pending`; NULL-capable typed
   paths (`orm_insert_full` / `orm_insert_returning_full` /
   `orm_update_by_id_full`); pool self-heal (reconnect on acquire) ✅
+- **P2.5 (2026-08-26):** migration history on boila — Simple Query
+  record/unrecord (same txn path as DDL); `42710`/`42P07`/`42701` after
+  UP records the version and continues instead of aborting the set ✅
 
 ## Success criteria
 

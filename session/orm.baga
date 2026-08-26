@@ -108,6 +108,21 @@ fn orm_err_exec(r: OrmExec) -> str {
     }
 }
 
+// SQLSTATE from pg_error_fields shape "SEV|SQLSTATE|message". "" if none.
+fn orm_sqlstate(r: OrmExec) -> str {
+    let e = orm_err_exec(r)
+    let i1 = str_find(e, "|")
+    if i1 < 0 {
+        return ""
+    }
+    let rest = substr(e, i1 + 1, len(e))
+    let i2 = str_find(rest, "|")
+    if i2 < 0 {
+        return rest
+    }
+    return substr(rest, 0, i2)
+}
+
 fn orm_tag(r: OrmExec) -> str {
     return match r {
         OrmEOk(x) => x.tag,

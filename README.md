@@ -53,7 +53,10 @@ let mut set = migrate_set_new()
 set = migrate_add(set, 20260803001, "create_users", up_sql, down_sql)
 // Migration { version, name, up, down } — one Vec, not four
 // …
-let r = migrate_up(db, set)?          // pending only, each in a transaction
+let r = migrate_up(db, set)?          // pending only; each in a transaction.
+                                      // duplicate-object (42710/42P07/42701)
+                                      // records the version and continues
+                                      // (DDL that committed without history)
 db = migrate_db(r)                    // always rebind (by-value structs)
 let n = migrate_applied_n(r)          // how many versions ran this call
 let s = migrate_up_steps(db, set, 2)? // staged: at most 2 pending (0 = all)

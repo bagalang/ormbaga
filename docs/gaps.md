@@ -108,6 +108,20 @@ Apps that need FK/SERIAL stay on real Postgres.
 Covered live: `tests/orm_test.baga` (Postgres) and
 `tests/orm_boila_test.baga` (serve_pg), 2026-08-24.
 
+## G11 — history INSERT lost after DDL (boila) — **closed 2026-08-26**
+
+**Symptom.** `migrate_up` wraps each version in `BEGIN` / DDL / history
+`INSERT` / `COMMIT`. The INSERT used Extended Query (`$1`); the DDL used
+Simple Query. On boila the extended DML path does not always see the
+simple-query txn, so the index/table commits and the history row does
+not. Next boot: `CREATE INDEX` → `42710` and the rest of the set never
+runs (bagabuch stopped at `index_accounts_number` with 14 history rows
+and 90 objects).
+
+**Fix.** History INSERT/DELETE are Simple Query (same path as DDL).
+`42710` / `42P07` / `42701` after UP: ROLLBACK, record the version,
+continue. Gate: `tests/orm_boila_test.baga` `dup_index_repaired`.
+
 ## Live check (2026-08-13)
 
 `tests/orm_boila_test.baga` срещу `serve_pg` — **36/36** (клиент и

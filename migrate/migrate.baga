@@ -48,21 +48,32 @@ fn migrate_ensure_table(db: OrmDb) -> OrmExec !IO !Net {
     return orm_exec(db, sql)?
 }
 
-// Record that a version was applied ($1 = version, $2 = name).
+// Record that a version was applied. Simple Query (not Extended) so the
+// INSERT rides the same session txn as BEGIN / DDL / COMMIT — boila's
+// extended DML path does not always see a simple-query BEGIN, and then
+// the history row is lost while the DDL stays (retry → 42710).
 fn migrate_record(db: OrmDb, version: i64, name: str) -> OrmExec !IO !Net {
-    let vals = vec_new()
-    let nulls = vec_new()
-    pg_param_i64(vals, nulls, version)
-    pg_param_str(vals, nulls, name)
-    return orm_exec_params(db, "INSERT INTO baga_schema_migrations (version, name) VALUES ($1, $2)", vals, nulls)?
+    let sql = concat("INSERT INTO baga_schema_migrations (version, name) VALUES (", concat(sql_i64(version), concat(", ", concat(sql_lit(name), ")"))))
+    return orm_exec(db, sql)?
 }
 
-// Remove a version record (after successful down).
+// Remove a version record (after successful down). Simple Query — same txn as DROP.
 fn migrate_unrecord(db: OrmDb, version: i64) -> OrmExec !IO !Net {
-    let vals = vec_new()
-    let nulls = vec_new()
-    pg_param_i64(vals, nulls, version)
-    return orm_exec_params(db, "DELETE FROM baga_schema_migrations WHERE version = $1", vals, nulls)?
+    return orm_exec(db, concat("DELETE FROM baga_schema_migrations WHERE version = ", sql_i64(version)))?
+}
+
+// DDL already-exists SQLSTATE: duplicate_object / duplicate_table / duplicate_column.
+fn migrate_is_ddl_dup(state: str) -> i64 {
+    if state == "42710" {
+        return 1
+    }
+    if state == "42P07" {
+        return 1
+    }
+    if state == "42701" {
+        return 1
+    }
+    return 0
 }
 
 // Applied versions ascending.
@@ -220,6 +231,9 @@ fn migrate_db(r: MigrateResult) -> OrmDb {
 // versions are fetched once and checked in memory (one round-trip, not one
 // COUNT per migration). Out-of-order sets (a pending version below the
 // highest applied one) fail loud — the history is dirty.
+// Duplicate-object SQLSTATE (42710 / 42P07 / 42701) after UP: the DDL from a
+// previous run stayed while the history INSERT did not — record the version
+// and continue (otherwise bagabuch-class apps die on the first CREATE INDEX).
 fn migrate_up(db: OrmDb, set: MigrationSet) -> MigrateResult !IO !Net {
     return migrate_up_steps(db, set, 0)?
 }
@@ -282,22 +296,41 @@ fn migrate_up_steps(db: OrmDb, set: MigrationSet, steps: i64) -> MigrateResult !
             }
             let ex = orm_exec(d, up)?
             d = orm_db_exec(ex)
+            let mut recorded: i64 = 0
             if orm_ok(ex) == 0 {
+                let st = orm_sqlstate(ex)
                 let rb = orm_rollback(d)?
-                return migrate_err(orm_db_exec(rb), concat(concat("up ", name), concat(": ", orm_err_exec(ex))))
+                d = orm_db_exec(rb)
+                // Object already exists from a previous run whose history
+                // INSERT did not persist (DDL committed, row missing).
+                // Record and continue instead of aborting the whole set.
+                if migrate_is_ddl_dup(st) == 1 {
+                    let recd = migrate_record(d, ver, name)?
+                    d = orm_db_exec(recd)
+                    if orm_ok(recd) == 0 {
+                        return migrate_err(d, concat("record: ", orm_err_exec(recd)))
+                    }
+                    recorded = 1
+                    count = count + 1
+                }
+                if recorded == 0 {
+                    return migrate_err(d, concat(concat("up ", name), concat(": ", orm_err_exec(ex))))
+                }
             }
-            let rec = migrate_record(d, ver, name)?
-            d = orm_db_exec(rec)
-            if orm_ok(rec) == 0 {
-                let rb2 = orm_rollback(d)?
-                return migrate_err(orm_db_exec(rb2), concat("record: ", orm_err_exec(rec)))
+            if recorded == 0 {
+                let rec = migrate_record(d, ver, name)?
+                d = orm_db_exec(rec)
+                if orm_ok(rec) == 0 {
+                    let rb2 = orm_rollback(d)?
+                    return migrate_err(orm_db_exec(rb2), concat("record: ", orm_err_exec(rec)))
+                }
+                let c = orm_commit(d)?
+                d = orm_db_exec(c)
+                if orm_ok(c) == 0 {
+                    return migrate_err(d, orm_err_exec(c))
+                }
+                count = count + 1
             }
-            let c = orm_commit(d)?
-            d = orm_db_exec(c)
-            if orm_ok(c) == 0 {
-                return migrate_err(d, orm_err_exec(c))
-            }
-            count = count + 1
         }
         i = i + 1
     }
