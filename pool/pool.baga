@@ -206,10 +206,11 @@ fn orm_pool_try_acquire(pool: OrmPool) -> OrmTryLease !Par !Net !IO !Random {
     }
     let t = chan_try_recv(pool.free_ch)
     let st = cell2_0(t)
+    let slot = cell2_1(t)
+    cell2_free(t)
     if st != 1 {
         return OrmTryLease { ok: st, lease: empty }
     }
-    let slot = cell2_1(t)
     if vec_get(pool.oks, slot) != 1 {
         orm_pool_heal(pool, slot)?
     }
