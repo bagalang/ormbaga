@@ -184,13 +184,13 @@ fn orm_exec_from(r: PgResult) -> OrmExec {
     if pg_ok(r) == 1 {
         return OrmEOk(OrmExecOk {
             tag: pg_tag(r),
-            db: OrmDb { conn: pg_conn_of(r), kv: drock_db_bad(""), backend: ORM_BE_PG() }
+            db: OrmDb { conn: pg_conn_of(r), kv: drock_db_bad(""), backend: ORM_BE_PG(), tx: map_new() }
         })
     }
     return OrmEErr(OrmExecFail {
         err: pg_err(r),
         tag: pg_tag(r),
-        db: OrmDb { conn: pg_conn_of(r), kv: drock_db_bad(""), backend: ORM_BE_PG() }
+        db: OrmDb { conn: pg_conn_of(r), kv: drock_db_bad(""), backend: ORM_BE_PG(), tx: map_new() }
     })
 }
 
@@ -201,13 +201,13 @@ fn orm_query_from(r: PgResult) -> OrmQuery {
             nrows: pg_nrows(r),
             ncols: pg_ncols(r),
             result: r,
-            db: OrmDb { conn: pg_conn_of(r), kv: drock_db_bad(""), backend: ORM_BE_PG() }
+            db: OrmDb { conn: pg_conn_of(r), kv: drock_db_bad(""), backend: ORM_BE_PG(), tx: map_new() }
         })
     }
     return OrmQErr(OrmQueryFail {
         err: pg_err(r),
         tag: pg_tag(r),
-        db: OrmDb { conn: pg_conn_of(r), kv: drock_db_bad(""), backend: ORM_BE_PG() }
+        db: OrmDb { conn: pg_conn_of(r), kv: drock_db_bad(""), backend: ORM_BE_PG(), tx: map_new() }
     })
 }
 

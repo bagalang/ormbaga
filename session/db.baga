@@ -13,27 +13,30 @@ import "std/os/os.baga"
 
 // backend: 0 = PG wire (Postgres или boilaDB), 1 = drock (rocksbaga KV).
 // PG пътът държи жив socket в conn и нежив handle в kv; drock пътът — обратното.
+// tx е буферът на KV транзакцията (виж session/kv_tx.baga): Map е референтен,
+// затова копиранията на OrmDb споделят едно състояние. PG пътът го държи празен.
 struct OrmDb {
     conn: PgConn,
     kv: DrokDB,
-    backend: i64
+    backend: i64,
+    tx: Map<str, str>
 }
 
 fn ORM_BE_PG() -> i64 { return 0 }
 fn ORM_BE_DROCK() -> i64 { return 1 }
 
 fn orm_db_bad(err: str) -> OrmDb {
-    return OrmDb { conn: pg_conn_bad(err), kv: drock_db_bad(err), backend: ORM_BE_PG() }
+    return OrmDb { conn: pg_conn_bad(err), kv: drock_db_bad(err), backend: ORM_BE_PG(), tx: map_new() }
 }
 
 // Wrap an existing PgConn (Postgres or boilaDB over PG wire).
 fn orm_from_conn(c: PgConn) -> OrmDb {
-    return OrmDb { conn: c, kv: drock_db_bad(""), backend: ORM_BE_PG() }
+    return OrmDb { conn: c, kv: drock_db_bad(""), backend: ORM_BE_PG(), tx: map_new() }
 }
 
 // Обвива жив DrokDB (rocksbaga). conn е нежив — само за да стои типът цял.
 fn orm_from_drock(k: DrokDB) -> OrmDb {
-    return OrmDb { conn: pg_conn_bad(""), kv: k, backend: ORM_BE_DROCK() }
+    return OrmDb { conn: pg_conn_bad(""), kv: k, backend: ORM_BE_DROCK(), tx: map_new() }
 }
 
 fn orm_is_drock(db: OrmDb) -> i64 {

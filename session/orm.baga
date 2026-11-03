@@ -9,6 +9,7 @@ import "drockb/drockb.baga"
 import "db.baga"
 import "result.baga"
 import "kv.baga"
+import "kv_tx.baga"
 import "kv_write.baga"
 import "kv_sort.baga"
 import "../sql/sql.baga"
@@ -53,17 +54,50 @@ fn orm_count_sql(db: OrmDb, sql: str) -> OrmCount !IO !Net {
 }
 
 // ---------- transactions ----------
+//
+// PG изпраща BEGIN/COMMIT по wire-а. rocksbaga няма такива команди, затова
+// транзакцията е буфер в OrmDb (session/kv_tx.baga): четенето в рамките на
+// искането вижда собствените си записи, COMMIT ги изсипва, ROLLBACK ги хвърля.
 
 fn orm_begin(db: OrmDb) -> OrmExec !IO !Net {
+    if orm_is_drock(db) == 1 {
+        kv_tx_begin(db)
+        return kv_exec_ok(db, "BEGIN")
+    }
     return orm_exec(db, "BEGIN")?
 }
 
 fn orm_commit(db: OrmDb) -> OrmExec !IO !Net {
+    if orm_is_drock(db) == 1 {
+        if kv_tx_flush(db) == 0 {
+            return kv_exec_err(db, "drock: COMMIT не изсипа буфера (загубена връзка?)")
+        }
+        return kv_exec_ok(db, "COMMIT")
+    }
     return orm_exec(db, "COMMIT")?
 }
 
 fn orm_rollback(db: OrmDb) -> OrmExec !IO !Net {
+    if orm_is_drock(db) == 1 {
+        kv_tx_rollback(db)
+        return kv_exec_ok(db, "ROLLBACK")
+    }
     return orm_exec(db, "ROLLBACK")?
+}
+
+// Превключвач за заявки: затвори транзакцията, която action-ът е оставил
+// отворена. Worker-ът споделя `db` със следващата заявка — при drock чужд
+// буфер би поел записите на непозната заявка, при PG същият leak продължава
+// txn-а. Връща db за reuse; при PG е no-op — от тук състоянието на сесията не се чете.
+fn orm_guard_txn(db: OrmDb) -> OrmDb !IO !Net {
+    if orm_is_drock(db) == 0 {
+        return db
+    }
+    if kv_tx_open(db) == 0 {
+        return db
+    }
+    let r = orm_rollback(db)?
+    return orm_db_exec(r)
 }
 
 // ---------- table API ----------

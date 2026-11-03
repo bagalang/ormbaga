@@ -289,3 +289,17 @@ fn kv_update_strs(db: OrmDb, table: str, id: i64, cols: Vec<str>, vals: Vec<str>
     }
     return kv_update_by_id(db, table, id, cols, vals, nulls)?
 }
+// KV изтрива по PK: изтриване по колона минава през вторичния индекс и ред по
+// ред. Ползва се за child таблиците (journal_lines, invoice_lines, ...) където
+// SQL версията имаше DELETE FROM t WHERE fk = $1.
+fn kv_delete_where(db: OrmDb, table: str, col: str, val: str) -> OrmExec !Net !IO {
+    // Индексът вече носи id-тата — не трябва редовете да се четат само за PK.
+    let ids = kv_ix_ids(db, table, col, val)?
+    let mut d = db
+    let mut r: i64 = 0
+    while r < vec_len(ids) {
+        d = orm_db_exec(kv_delete_by_id(d, table, parse_int(vec_get(ids, r)))?)
+        r = r + 1
+    }
+    return kv_exec_ok(d, "DELETE")
+}

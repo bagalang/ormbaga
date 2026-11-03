@@ -1,0 +1,94 @@
+// session/kv_tx.baga — транзакция за KV backend-а (ORM_BACKEND=drock).
+//
+// rocksbaga няма MULTI/EXEC, затова BEGIN/COMMIT се правят тук: записите се
+// трупат в буфер, четенето минава през него, а COMMIT го изсипва с MSET/DEL.
+// Буферът е Map поле на OrmDb — Map-овете в baga са референтни, така че
+// копиранията на OrmDb (orm_db_q/orm_db_exec) споделят едно и също състояние.
+//
+// Какво НЕ дава: атомарност при срив. rocksbaga прилага всяка команда
+// поотделно, така че процес, умрял по средата на COMMIT, може да остави
+// частично записан буфер. Приоритетът е читателската консистентност в
+// рамките на заявката (да не се виждат недовършено постнати фактури) — виж
+// buchnative/docs/conventions.md.
+
+import "db.baga"
+import "kv_raw.baga"
+import "std/str/str.baga"
+
+// Буферът живее в db.tx; специалният ключ пази дали транзакцията е отворена.
+// Редовните KV ключове започват с "kv:t:" / "kv:mig:", така че маркерите не се
+// сбъркват с данни.
+fn KV_TX_FLAG() -> str { return "#tx" }
+fn KV_TX_DEL() -> str { return "#del" }
+
+fn kv_tx_open(db: OrmDb) -> i64 {
+    return map_has(db.tx, KV_TX_FLAG())
+}
+
+fn kv_tx_clear(db: OrmDb) {
+    let keys = map_keys(db.tx)
+    let mut i: i64 = 0
+    while i < vec_len(keys) {
+        map_del(db.tx, vec_get(keys, i))
+        i = i + 1
+    }
+}
+
+// Започва транзакция. Буфер от прекъсната заявка се изхвърля: worker-ът
+// споделя връзката си със следващите искания, а мъртво BEGIN в PG дава същото.
+fn kv_tx_begin(db: OrmDb) -> i64 {
+    kv_tx_clear(db)
+    map_set(db.tx, KV_TX_FLAG(), "1")
+    return 1
+}
+
+fn kv_tx_rollback(db: OrmDb) -> i64 {
+    kv_tx_clear(db)
+    return 1
+}
+
+fn kv_tx_has(db: OrmDb, key: str) -> i64 {
+    if kv_tx_open(db) == 0 {
+        return 0
+    }
+    return map_has(db.tx, key)
+}
+
+fn kv_tx_value(db: OrmDb, key: str) -> str {
+    return map_get(db.tx, key)
+}
+
+fn kv_tx_store(db: OrmDb, key: str, val: str) {
+    map_set(db.tx, key, val)
+}
+
+// Изсипва буфера върху rocksbaga и го затваря. Вмъкванията и изтриванията не
+// се припокриват (един ключ има едно състояние), редът между тях няма значение.
+fn kv_tx_flush(db: OrmDb) -> i64 !Net !IO {
+    let keys = map_keys(db.tx)
+    let puts: Vec<str> = vec_new()
+    let vals: Vec<str> = vec_new()
+    let dels: Vec<str> = vec_new()
+    let mut i: i64 = 0
+    while i < vec_len(keys) {
+        let k = vec_get(keys, i)
+        if k != KV_TX_FLAG() {
+            let v = map_get(db.tx, k)
+            if v == KV_TX_DEL() {
+                vec_push(dels, k)
+            } else {
+                vec_push(puts, k)
+                vec_push(vals, v)
+            }
+        }
+        i = i + 1
+    }
+    if vec_len(puts) > 0 && kv_raw_mset(db, puts, vals) == 0 {
+        return 0
+    }
+    if vec_len(dels) > 0 && kv_raw_del_many(db, dels) == 0 {
+        return 0
+    }
+    kv_tx_clear(db)
+    return 1
+}

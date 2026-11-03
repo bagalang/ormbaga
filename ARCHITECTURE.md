@@ -18,7 +18,17 @@ ormbaga/
 ├── sql/
 │   └── sql.baga          # pure quote / builders / $1 placeholders
 ├── session/
-│   └── orm.baga          # OrmDb, CRUD, prepare, cell accessors
+│   ├── db.baga           # OrmDb + backend избор (PG wire / drock)
+│   ├── orm.baga          # CRUD, prepare, transactions — разклонено по backend
+│   ├── result.baga       # OrmQuery/OrmExec/OrmCount + accessor-ите
+│   ├── kv.baga           # rocksbaga: ключове, OrmQuery от KV, четене
+│   ├── kv_raw.baga       # rocksbaga: примитивите (MGET/MSET/DEL) без overlay
+│   ├── kv_tx.baga        # rocksbaga: BEGIN/COMMIT като буфер пред себе си
+│   ├── kv_write.baga     # rocksbaga: insert/update/delete + поддръжка на индекси
+│   ├── kv_row.baga       # rocksbaga: JSON редът (cols/vals/nulls)
+│   ├── kv_sort.baga      # rocksbaga: ORDER BY (мулти-ключ, посоки)
+│   ├── kv_join.baga      # rocksbaga: LEFT JOIN в паметта (kv_attach)
+│   └── kv_migrate.baga   # rocksbaga: versioned KV миграции
 ├── migrate/
 │   ├── migrate.baga      # up / down / status registry
 │   └── schema.baga       # sample users+posts migrations

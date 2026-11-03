@@ -1,35 +1,59 @@
 // kv_sort.baga — сортиране на KV резултати (заменя ORDER BY).
 //
 // Отделен модул, за да не минава session/orm.baga 600-редовия gate.
+//
+// KV няма SQL ORDER BY: редовете се зареждат и редят тук. Multi-key редът се
+// минава отдясно наляво с стабилен sort, затова смесени посоки
+// (date DESC, currency ASC) дават същото като в SQL.
 
 import "db.baga"
 import "result.baga"
 import "kv.baga"
 import "std/str/str.baga"
 
-// Редовете на цялата таблица, сортирани по текстовата стойност на колона.
-fn kv_select_all_order(db: OrmDb, table: str, col: str, cols: Vec<str>) -> OrmQuery !Net !IO {
-    let q = kv_select_all(db, table, cols)?
-    if orm_ok_q(q) == 0 {
-        return q
+// Ключът за ONE колона: числовите колони (id, *_id) се подравняват до 10 digits,
+// защото текстовият ред на "9" и "10" е обратен на числовия, а ORDER BY id е числов.
+fn kv_order_key(q: OrmQuery, row: i64, col: str) -> str {
+    let ci = orm_col_index(q, col)
+    if ci < 0 {
+        return ""
     }
+    let v = orm_cell(q, row, ci)
+    if col == "id" || str_ends_with(col, "_id") {
+        return kv_pad12(parse_int(v))
+    }
+    return v
+}
+
+// Стойностите на sort колоната за всеки ред (в реда на q).
+fn kv_order_values(q: OrmQuery, col: str) -> Vec<str> {
+    let keys: Vec<str> = vec_new()
+    let mut i: i64 = 0
+    while i < orm_nrows(q) {
+        vec_push(keys, kv_order_key(q, i, col))
+        i = i + 1
+    }
+    return keys
+}
+
+// Пренарежда q по sort_cols с посоки dirs (1 = DESC). Колоните, които q няма,
+// се игнорират — както SQL игнорира неизвестно сортиране при грешен израз.
+fn kv_reorder_dir(q: OrmQuery, cols: Vec<str>, sort_cols: Vec<str>, dirs: Vec<i64>) -> OrmQuery {
     let n = orm_nrows(q)
     if n < 2 {
         return q
     }
-    let ci = orm_col_index(q, col)
-    if ci < 0 {
-        return q
-    }
-    let keys: Vec<str> = vec_new()
     let order: Vec<i64> = vec_new()
     let mut i: i64 = 0
     while i < n {
-        vec_push(keys, orm_cell(q, i, ci))
         vec_push(order, i)
         i = i + 1
     }
-    kv_sort_idx(keys, order)
+    let mut k = vec_len(sort_cols) - 1
+    while k >= 0 {
+        kv_sort_idx(kv_order_values(q, vec_get(sort_cols, k)), order, vec_get(dirs, k))
+        k = k - 1
+    }
     let ncols = vec_len(cols)
     let cells: Vec<str> = vec_new()
     let nulls: Vec<i64> = vec_new()
@@ -38,8 +62,9 @@ fn kv_select_all_order(db: OrmDb, table: str, col: str, cols: Vec<str>) -> OrmQu
         let src = vec_get(order, r)
         let mut c: i64 = 0
         while c < ncols {
-            vec_push(cells, orm_cell(q, src, c))
-            vec_push(nulls, orm_isnull(q, src, c))
+            let ci = orm_col_index(q, vec_get(cols, c))
+            vec_push(cells, orm_cell(q, src, ci))
+            vec_push(nulls, orm_isnull(q, src, ci))
             c = c + 1
         }
         r = r + 1
@@ -47,42 +72,102 @@ fn kv_select_all_order(db: OrmDb, table: str, col: str, cols: Vec<str>) -> OrmQu
     return kv_query_ok(orm_db_q(q), cols, cells, nulls, n)
 }
 
-// Редове по една колона, сортирани по друга (заменя WHERE col = ? ORDER BY x).
-fn kv_where_order(db: OrmDb, table: str, col: str, val: str, order_col: str, cols: Vec<str>) -> OrmQuery !Net !IO {
+// Пренарежда q по една колона, възходящо (най-честият случай).
+fn kv_reorder(q: OrmQuery, cols: Vec<str>, sort_cols: Vec<str>) -> OrmQuery {
+    let dirs: Vec<i64> = vec_new()
+    let mut i: i64 = 0
+    while i < vec_len(sort_cols) {
+        vec_push(dirs, 0)
+        i = i + 1
+    }
+    return kv_reorder_dir(q, cols, sort_cols, dirs)
+}
+
+fn kv_dirs_asc(n: i64) -> Vec<i64> {
+    let d: Vec<i64> = vec_new()
+    let mut i: i64 = 0
+    while i < n {
+        vec_push(d, 0)
+        i = i + 1
+    }
+    return d
+}
+
+fn kv_select_all_dir(db: OrmDb, table: str, cols: Vec<str>, sort_cols: Vec<str>, dirs: Vec<i64>) -> OrmQuery !Net !IO {
+    let q = kv_select_all(db, table, cols)?
+    if orm_ok_q(q) == 0 {
+        return q
+    }
+    return kv_reorder_dir(q, cols, sort_cols, dirs)
+}
+
+// Редовете на цялата таблица, сортирани по текстовата стойност на колона.
+fn kv_select_all_order(db: OrmDb, table: str, col: str, cols: Vec<str>) -> OrmQuery !Net !IO {
+    let sc: Vec<str> = vec_new()
+    vec_push(sc, col)
+    return kv_select_all_dir(db, table, cols, sc, kv_dirs_asc(1))
+}
+
+// Редовете на цялата таблица, сортирани по две колони (ORDER BY a, b).
+fn kv_select_all_order2(db: OrmDb, table: str, c1: str, c2: str, cols: Vec<str>) -> OrmQuery !Net !IO {
+    let sc: Vec<str> = vec_new()
+    vec_push(sc, c1)
+    vec_push(sc, c2)
+    return kv_select_all_dir(db, table, cols, sc, kv_dirs_asc(2))
+}
+
+// Редове по две колони (AND), сортирани по подадените колони/посоки.
+// kv_select_where2 смята сечението на двата индекса, затова AND е точен.
+fn kv_where2_dir(db: OrmDb, table: str, c1: str, v1: str, c2: str, v2: str, cols: Vec<str>, sort_cols: Vec<str>, dirs: Vec<i64>) -> OrmQuery !Net !IO {
+    let q = kv_select_where2(db, table, c1, v1, c2, v2, cols)?
+    if orm_ok_q(q) == 0 {
+        return q
+    }
+    return kv_reorder_dir(q, cols, sort_cols, dirs)
+}
+
+// Редове по една колона, сортирани по подадени колони/посоки.
+fn kv_where_dir(db: OrmDb, table: str, col: str, val: str, cols: Vec<str>, sort_cols: Vec<str>, dirs: Vec<i64>) -> OrmQuery !Net !IO {
     let q = kv_select_where(db, table, col, val, cols)?
     if orm_ok_q(q) == 0 {
         return q
     }
-    let n = orm_nrows(q)
-    if n < 2 {
-        return q
+    return kv_reorder_dir(q, cols, sort_cols, dirs)
+}
+
+// Редове по една колона, сортирани по друга (заменя WHERE col = ? ORDER BY x).
+fn kv_where_order(db: OrmDb, table: str, col: str, val: str, order_col: str, cols: Vec<str>) -> OrmQuery !Net !IO {
+    let sc: Vec<str> = vec_new()
+    vec_push(sc, order_col)
+    return kv_where_dir(db, table, col, val, cols, sc, kv_dirs_asc(1))
+}
+
+// Редове по една колона, сортирани по две (WHERE col = ? ORDER BY a, b).
+fn kv_where_order2(db: OrmDb, table: str, col: str, val: str, c1: str, c2: str, cols: Vec<str>) -> OrmQuery !Net !IO {
+    let sc: Vec<str> = vec_new()
+    vec_push(sc, c1)
+    vec_push(sc, c2)
+    return kv_where_dir(db, table, col, val, cols, sc, kv_dirs_asc(2))
+}
+
+// Редове на цялата таблица, подредени по максималната стойност на колона
+// ( replaces MAX(col) / ORDER BY col DESC LIMIT 1 без пълен sort).
+fn kv_max_value(db: OrmDb, table: str, col: str) -> str !Net !IO {
+    let cols: Vec<str> = vec_new()
+    vec_push(cols, col)
+    let q = kv_select_all(db, table, cols)?
+    if orm_ok_q(q) == 0 {
+        return ""
     }
-    let ci = orm_col_index(q, order_col)
-    if ci < 0 {
-        return q
-    }
-    let keys: Vec<str> = vec_new()
-    let order: Vec<i64> = vec_new()
+    let mut best = ""
+    let ci = orm_col_index(q, col)
     let mut i: i64 = 0
-    while i < n {
-        vec_push(keys, orm_cell(q, i, ci))
-        vec_push(order, i)
+    while i < orm_nrows(q) {
+        let v = orm_cell(q, i, ci)
+        if best == "" || kv_strcmp(v, best) > 0 {
+            best = v
+        }
         i = i + 1
     }
-    kv_sort_idx(keys, order)
-    let ncols = vec_len(cols)
-    let cells: Vec<str> = vec_new()
-    let nulls: Vec<i64> = vec_new()
-    let mut r: i64 = 0
-    while r < n {
-        let src = vec_get(order, r)
-        let mut c: i64 = 0
-        while c < ncols {
-            vec_push(cells, orm_cell(q, src, c))
-            vec_push(nulls, orm_isnull(q, src, c))
-            c = c + 1
-        }
-        r = r + 1
-    }
-    return kv_query_ok(orm_db_q(q), cols, cells, nulls, n)
+    return best
 }

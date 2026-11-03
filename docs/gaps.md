@@ -128,3 +128,37 @@ continue. Gate: `tests/orm_boila_test.baga` `dup_index_repaired`.
 сървър с и без `--rc`). `demo_boila` migrate+CRUD OK. Без peer в
 `baga-test` остава FAIL (очакван external-peer). Вж.
 `bench/boila/results/orm-boila-2026-08-13.md`.
+
+## G12 — drock (rocksbaga) backend: какво не е SQL
+
+**Symptom.** `ORM_BACKEND=drock` дава същия `OrmDb` и същите accessor-и, но
+долу няма сесия на SQL двигател. Не нещата, които layer-ът не крие:
+
+- **64 аргумента на команда.** rocksbaga затваря връзката при по-голям брой, а
+  мъртва връзка отравя целия worker (503 до рестарт). `kv_mget` / `kv_mset` /
+  `kv_raw_del_many` режат на парчета под `KV_CMD_MAX_ARGS()`.
+- **COMMIT не е атомен.** `orm_begin` трупа записите в `OrmDb.tx`
+  (`session/kv_tx.baga`), `orm_commit` ги изсипва с `MSET`/`DEL`, `orm_rollback`
+  ги хвърля. Читателят в рамките на заявката вижда собствените си редове, но
+  процес, умрял по средата на изсипването, може да остави частичен buffer.
+  Идва си само от write batch в rocksbaga, не от този слой.
+- **Няма UNIQUE, няма CHECK, няма суми.** Уникалността я пази приложението
+  (upsert или проверка преди insert); `SUM`/`MAX(col)` се правят в модела с
+  `bagadecimal` / `kv_max_value`.
+- **WHERE е само равенство.** Индексът е `kv:t:<table>:ix:<col>:<val>` за
+  стойности до 120 байта; `!=`, `LIKE`, `BETWEEN`, `<` се филтрират в модела
+  след GET-а. `ORDER BY` е сортиране в паметта (`kv_sort.baga`), с numeric
+  подравняване за `id`/`*_id`.
+- **Граница на заявката.** `orm_guard_txn(db)` (извиква се от `fmrbaga` след
+  хендлъра) хвърля буфер на транзакция, която action-ът е оставил отворена —
+  worker-ът споделя `db`-то си със следващата заявка. Покрито от
+  `tests/orm_drock_test.baga` (`guard_closes_abandoned_txn`).
+- **Суров SQL е грешка.** `orm_query_params` / `orm_exec_params` / `orm_exec`
+  върху drock връщат ясна грешка и **не пипат `db`** — преди да е пипнал,
+  `orm_query_from` подменяше живата връзка на работника с мъртва PG-овска.
+- **KV миграциите са отделен регистър.** `KvMigration` + `kv_migrate_run`
+  (версия под `kv:mig:<table>`), forward-only и идемпотентни; SQL DDL-ът не
+  се изпълнява тук.
+
+**Verdict.** Acceptable за product върху KV: моделите се прехищят към
+`kv_select_*`, а границите са документирани, не маскирани.

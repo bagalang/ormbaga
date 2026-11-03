@@ -1,0 +1,76 @@
+// kv_join.baga — свързване на KV таблици в паметта (rocksbaga няма JOIN).
+//
+// Дясната страна се чете като обикновен OrmQuery и се свива до map ключ→стойност,
+// после вляво се дописват колони. Липсващ ключ дава "" — точно това дава NULL при
+// ляво свързване, така че action-ите четат резултата без промяна.
+//
+// Сглобяването е пълно сканиране на дясната таблица: за счетоводните размери
+// (хиляди редове) е по-бързо от N+1 към rocksbaga, но не е безплатно.
+
+import "db.baga"
+import "result.baga"
+import "kv.baga"
+import "std/str/str.baga"
+
+// Стойностите на колона — по една на ред (ключовете за свързване).
+fn kv_col_values(q: OrmQuery, col: str) -> Vec<str> {
+    let keys: Vec<str> = vec_new()
+    let mut i: i64 = 0
+    while i < orm_nrows(q) {
+        vec_push(keys, orm_cell_by(q, i, col))
+        i = i + 1
+    }
+    return keys
+}
+
+// Map ключ→стойност от две колони на дясната таблица.
+fn kv_map_of(q: OrmQuery, key_col: str, val_col: str) -> Map<str, str> {
+    let m: Map<str, str> = map_new()
+    let mut i: i64 = 0
+    while i < orm_nrows(q) {
+        map_set(m, orm_cell_by(q, i, key_col), orm_cell_by(q, i, val_col))
+        i = i + 1
+    }
+    return m
+}
+
+// Списък колоните + една нова отдясно (реда на q трябва да ги съдържа).
+fn kv_cols_plus(cols: Vec<str>, extra: str) -> Vec<str> {
+    let out: Vec<str> = vec_new()
+    let mut i: i64 = 0
+    while i < vec_len(cols) {
+        vec_push(out, vec_get(cols, i))
+        i = i + 1
+    }
+    vec_push(out, extra)
+    return out
+}
+
+// Дописва out_col от map-а по ключа на реда; NULL-ите отляво се запазват.
+// Два JOIN-а се правят с два последователни викания (вторият минава през първия резултат).
+fn kv_attach(q: OrmQuery, cols: Vec<str>, keys: Vec<str>, m: Map<str, str>, out_col: str) -> OrmQuery {
+    let ncols = vec_len(cols)
+    let idx: Vec<i64> = vec_new()
+    let mut c: i64 = 0
+    while c < ncols {
+        vec_push(idx, orm_col_index(q, vec_get(cols, c)))
+        c = c + 1
+    }
+    let cells: Vec<str> = vec_new()
+    let nulls: Vec<i64> = vec_new()
+    let n = orm_nrows(q)
+    let mut i: i64 = 0
+    while i < n {
+        let mut k: i64 = 0
+        while k < ncols {
+            let ci = vec_get(idx, k)
+            vec_push(cells, orm_cell(q, i, ci))
+            vec_push(nulls, orm_isnull(q, i, ci))
+            k = k + 1
+        }
+        vec_push(cells, map_get(m, vec_get(keys, i)))
+        vec_push(nulls, 0)
+        i = i + 1
+    }
+    return kv_query_ok(orm_db_q(q), kv_cols_plus(cols, out_col), cells, nulls, n)
+}

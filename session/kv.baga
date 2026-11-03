@@ -16,7 +16,9 @@
 
 import "db.baga"
 import "result.baga"
+import "kv_raw.baga"
 import "kv_row.baga"
+import "kv_tx.baga"
 import "drockb/drockb.baga"
 import "pgbaga/pg.baga"
 import "std/bytes/bytes.baga"
@@ -55,92 +57,97 @@ fn kv_key_ix(table: str, col: str, val: str) -> str {
     return concat(ORM_KV_NS(), concat(table, concat(":ix:", concat(col, concat(":", val)))))
 }
 
-// ── суров KV достъп ───────────────────────────────────────────────────────
+// ── суров KV достъп (през транзакционния overlay) ─────────────────────────
+//
+// kv_raw.baga говори към rocksbaga; тук всяка операция пита дали OrmDb има
+// отворена транзакция. Четенето допълва стойностите от буфера, записването ги
+// трупа в него — така action-ите виждат собствените си редове преди COMMIT.
 
 fn kv_get(db: OrmDb, key: str) -> str !Net !IO {
-    return drock_get_str(db.kv, key)?
+    if kv_tx_has(db, key) == 1 {
+        let v = kv_tx_value(db, key)
+        if v == KV_TX_DEL() {
+            return ""
+        }
+        return v
+    }
+    return kv_raw_get(db, key)?
 }
 
 fn kv_put(db: OrmDb, key: str, val: str) -> i64 !Net !IO {
-    let r = drock_put_str(db.kv, key, val)?
-    return r.ok
+    if kv_tx_open(db) == 1 {
+        kv_tx_store(db, key, val)
+        return 1
+    }
+    return kv_raw_put(db, key, val)?
 }
 
 fn kv_del(db: OrmDb, key: str) -> i64 !Net !IO {
-    let r = drock_delete(db.kv, bytes_of_str(key))?
-    return r.ok
-}
-
-fn kv_incr(db: OrmDb, key: str) -> i64 !Net !IO {
-    let r = drock_incr(db.kv, bytes_of_str(key))?
-    if r.ok == 0 {
-        return 0 - 1
+    if kv_tx_open(db) == 1 {
+        kv_tx_store(db, key, KV_TX_DEL())
+        return 1
     }
-    return r.n
+    return kv_raw_del(db, key)?
 }
 
-// rocksbaga приема най-много 64 аргумента на команда (63 ключа + "MGET").
-// Затова четем на парчета — иначе сървърът затваря връзката и всичко след
-// това върви с "connection lost" / "database unavailable".
-fn KV_CMD_MAX_ARGS() -> i64 { return 64 }
+// INCR в транзакция се смята от базовата стойност + буфера; при ROLLBACK
+// остава неизползван id, което за счетоводството е безвредно (id-тата не са
+// последователни и извън транзакция).
+fn kv_incr(db: OrmDb, key: str) -> i64 !Net !IO {
+    if kv_tx_open(db) == 0 {
+        return kv_raw_incr(db, key)?
+    }
+    let mut cur: i64 = 0
+    if kv_tx_has(db, key) == 1 {
+        cur = parse_int(kv_tx_value(db, key))
+    } else {
+        cur = parse_int(kv_raw_get(db, key)?)
+    }
+    let n = cur + 1
+    kv_tx_store(db, key, int_to_str(n))
+    return n
+}
 
 fn kv_mget(db: OrmDb, keys: Vec<str>) -> Vec<str> !Net !IO {
-    let out: Vec<str> = vec_new()
-    if vec_len(keys) == 0 {
+    let out = kv_raw_mget(db, keys)?
+    if kv_tx_open(db) == 0 {
         return out
     }
-    let chunk = KV_CMD_MAX_ARGS() - 4
-    let mut off: i64 = 0
-    while off < vec_len(keys) {
-        let bk: Vec<bytes> = vec_new()
-        let mut i = off
-        let end = off + chunk
-        while i < vec_len(keys) && i < end {
-            vec_push(bk, bytes_of_str(vec_get(keys, i)))
-            i = i + 1
+    if vec_len(out) != vec_len(keys) {
+        return out
+    }
+    let mut i: i64 = 0
+    while i < vec_len(keys) {
+        if kv_tx_has(db, vec_get(keys, i)) == 1 {
+            kv_mget_patch(db, out, i, vec_get(keys, i))
         }
-        let r = drock_mget(db.kv, bk)?
-        if r.ok == 0 {
-            return out
-        }
-        let mut j: i64 = 0
-        while j < vec_len(r.vals) {
-            vec_push(out, str_of_bytes(vec_get(r.vals, j)))
-            j = j + 1
-        }
-        off = off + chunk
+        i = i + 1
     }
     return out
 }
 
-// MSET носи по 2 аргумента на двойка — пак под 64-аргументния таван.
-fn kv_mset(db: OrmDb, keys: Vec<str>, vals: Vec<str>) -> i64 !Net !IO {
-    if vec_len(keys) == 0 || vec_len(keys) != vec_len(vals) {
-        return 0
+fn kv_mget_patch(db: OrmDb, out: Vec<str>, i: i64, key: str) {
+    let mut v = kv_tx_value(db, key)
+    if v == KV_TX_DEL() {
+        v = ""
     }
-    let chunk = (KV_CMD_MAX_ARGS() - 4) / 2
-    let mut off: i64 = 0
-    while off < vec_len(keys) {
-        let bk: Vec<bytes> = vec_new()
-        let bv: Vec<bytes> = vec_new()
-        let mut i = off
-        let end = off + chunk
-        while i < vec_len(keys) && i < end {
-            vec_push(bk, bytes_of_str(vec_get(keys, i)))
-            vec_push(bv, bytes_of_str(vec_get(vals, i)))
-            i = i + 1
-        }
-        let r = drock_mset(db.kv, bk, bv)?
-        if r.ok == 0 {
-            return 0
-        }
-        off = off + chunk
-    }
-    return 1
+    vec_set(out, i, v)
 }
 
-
-
+fn kv_mset(db: OrmDb, keys: Vec<str>, vals: Vec<str>) -> i64 !Net !IO {
+    if vec_len(keys) != vec_len(vals) {
+        return 0
+    }
+    if kv_tx_open(db) == 1 {
+        let mut i: i64 = 0
+        while i < vec_len(keys) {
+            kv_tx_store(db, vec_get(keys, i), vec_get(vals, i))
+            i = i + 1
+        }
+        return 1
+    }
+    return kv_raw_mset(db, keys, vals)?
+}
 
 fn kv_ids_add(db: OrmDb, key: str, id: str) -> i64 !Net !IO {
     let ids = kv_ids_parse(kv_get(db, key)?)
@@ -364,7 +371,10 @@ fn kv_count_sql(db: OrmDb, sql: str) -> OrmCount !Net !IO {
 
 // ── сортиране (заменя ORDER BY) ───────────────────────────────────────────
 
-fn kv_sort_idx(keys: Vec<str>, order: Vec<i64>) {
+// Стабилен insertion sort по индекси. desc==1 обръща наредбата, но местят се
+// само строго по-добрите — равните стойности си остават в реда, което прави
+// многоpasses sort (date DESC, currency ASC) възможен.
+fn kv_sort_idx(keys: Vec<str>, order: Vec<i64>, desc: i64) {
     let n = vec_len(order)
     let mut i: i64 = 1
     while i < n {
@@ -374,7 +384,11 @@ fn kv_sort_idx(keys: Vec<str>, order: Vec<i64>) {
         let mut stop: i64 = 0
         while j >= 0 && stop == 0 {
             let oj = vec_get(order, j)
-            if kv_strcmp(vec_get(keys, oj), ki) > 0 {
+            let cmp = kv_strcmp(vec_get(keys, oj), ki)
+            if cmp > 0 && desc == 0 {
+                vec_set(order, j + 1, oj)
+                j = j - 1
+            } else if cmp < 0 && desc == 1 {
                 vec_set(order, j + 1, oj)
                 j = j - 1
             } else {

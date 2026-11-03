@@ -1,8 +1,12 @@
 # ormbaga
 
 **Table ORM + versioned migrations** for Baga, on top of
-[`../pgbaga`](../pgbaga/README.md). Same session can target **PostgreSQL** or
-**boilaDB** (PG wire) via [`../boilabaga`](../boilabaga/README.md).
+[`../pgbaga`](../pgbaga/README.md). One `OrmDb` type, three backends:
+**PostgreSQL** and **boilaDB** over the PG wire, and **rocksbaga** (KV, RESP2)
+over [`../drockb`](../drockb/README.md) — `ORM_BACKEND=drock`. The KV path keeps
+the same table API and the same `OrmQuery` accessors, so an app written against
+Postgres reads rows identically; only raw SQL does not translate (see
+[`docs/gaps.md`](docs/gaps.md) G12).
 
 This repository is the package. The compiler, `std`, `pgbaga`, and
 `boilabaga` stay in the baga language monorepo. Check this tree out as
@@ -30,7 +34,10 @@ Architecture: [`ARCHITECTURE.md`](ARCHITECTURE.md).
 | Path | Role |
 |------|------|
 | `sql/sql.baga` | pure quote/escape/SQL builders + `$1` placeholders |
-| `session/orm.baga` | `OrmDb` session + table CRUD over pgbaga / boilabaga |
+| `session/db.baga` | `OrmDb` + backend избор (PG wire или drock) |
+| `session/result.baga` | `OrmQuery` / `OrmExec` / `OrmCount` + accessor-ите |
+| `session/orm.baga` | table CRUD + transactions, разклонени по backend |
+| `session/kv*.baga` | table слойът върху rocksbaga: ключове, запис, sort, JOIN, транзакция, миграции |
 | `migrate/migrate.baga` | migration registry + `up` / `down` / `status` |
 | `migrate/schema.baga` | **sample only** migrations (Postgres + boila) — apps own schema |
 | `pool/pool.baga` | shared session pool (sync/batch) |
@@ -141,6 +148,23 @@ your own set that stays inside the boila subset. See boilabaga dialect notes.
 
 Env: `ORM_BACKEND=boila` makes `orm_connect_auto_env` / `orm_pool_from_auto_env`
 target boilaDB; default is Postgres (`PG*`).
+
+## Setup (rocksbaga)
+
+```bash
+# terminal 1 — KV сървърът (RESP2, без автентикация)
+cd ../..   # корена на baga монорепото
+LSMPATH=/tmp/ormkv LSMPORT=16579 ./baga -I . -I app-product app-product/rocksbaga/tools/serve.baga
+
+# terminal 2
+export ORM_BACKEND=drock DROCK_HOST=127.0.0.1 DROCK_PORT=16579
+./baga -I . -I app-product tests/orm_drock_test.baga
+```
+
+`orm_connect_drock_env()` взима адреса от `DROCK_HOST`/`DROCK_PORT`; `fmr_run` на
+`fmrbaga` прави същото при `ORM_BACKEND=drock`. Редът е JSON под
+`kv:t:<table>:<id>`, вторичните индекси са `kv:t:<table>:ix:<col>:<val>`, а PK
+идва от `kv:t:<table>:seq`.
 
 ## Run
 
