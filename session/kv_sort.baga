@@ -1,0 +1,88 @@
+// kv_sort.baga — сортиране на KV резултати (заменя ORDER BY).
+//
+// Отделен модул, за да не минава session/orm.baga 600-редовия gate.
+
+import "db.baga"
+import "result.baga"
+import "kv.baga"
+import "std/str/str.baga"
+
+// Редовете на цялата таблица, сортирани по текстовата стойност на колона.
+fn kv_select_all_order(db: OrmDb, table: str, col: str, cols: Vec<str>) -> OrmQuery !Net !IO {
+    let q = kv_select_all(db, table, cols)?
+    if orm_ok_q(q) == 0 {
+        return q
+    }
+    let n = orm_nrows(q)
+    if n < 2 {
+        return q
+    }
+    let ci = orm_col_index(q, col)
+    if ci < 0 {
+        return q
+    }
+    let keys: Vec<str> = vec_new()
+    let order: Vec<i64> = vec_new()
+    let mut i: i64 = 0
+    while i < n {
+        vec_push(keys, orm_cell(q, i, ci))
+        vec_push(order, i)
+        i = i + 1
+    }
+    kv_sort_idx(keys, order)
+    let ncols = vec_len(cols)
+    let cells: Vec<str> = vec_new()
+    let nulls: Vec<i64> = vec_new()
+    let mut r: i64 = 0
+    while r < n {
+        let src = vec_get(order, r)
+        let mut c: i64 = 0
+        while c < ncols {
+            vec_push(cells, orm_cell(q, src, c))
+            vec_push(nulls, orm_isnull(q, src, c))
+            c = c + 1
+        }
+        r = r + 1
+    }
+    return kv_query_ok(orm_db_q(q), cols, cells, nulls, n)
+}
+
+// Редове по една колона, сортирани по друга (заменя WHERE col = ? ORDER BY x).
+fn kv_where_order(db: OrmDb, table: str, col: str, val: str, order_col: str, cols: Vec<str>) -> OrmQuery !Net !IO {
+    let q = kv_select_where(db, table, col, val, cols)?
+    if orm_ok_q(q) == 0 {
+        return q
+    }
+    let n = orm_nrows(q)
+    if n < 2 {
+        return q
+    }
+    let ci = orm_col_index(q, order_col)
+    if ci < 0 {
+        return q
+    }
+    let keys: Vec<str> = vec_new()
+    let order: Vec<i64> = vec_new()
+    let mut i: i64 = 0
+    while i < n {
+        vec_push(keys, orm_cell(q, i, ci))
+        vec_push(order, i)
+        i = i + 1
+    }
+    kv_sort_idx(keys, order)
+    let ncols = vec_len(cols)
+    let cells: Vec<str> = vec_new()
+    let nulls: Vec<i64> = vec_new()
+    let mut r: i64 = 0
+    while r < n {
+        let src = vec_get(order, r)
+        let mut c: i64 = 0
+        while c < ncols {
+            vec_push(cells, orm_cell(q, src, c))
+            vec_push(nulls, orm_isnull(q, src, c))
+            c = c + 1
+        }
+        r = r + 1
+    }
+    return kv_query_ok(orm_db_q(q), cols, cells, nulls, n)
+}

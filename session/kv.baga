@@ -79,43 +79,64 @@ fn kv_incr(db: OrmDb, key: str) -> i64 !Net !IO {
     return r.n
 }
 
+// rocksbaga приема най-много 64 аргумента на команда (63 ключа + "MGET").
+// Затова четем на парчета — иначе сървърът затваря връзката и всичко след
+// това върви с "connection lost" / "database unavailable".
+fn KV_CMD_MAX_ARGS() -> i64 { return 64 }
+
 fn kv_mget(db: OrmDb, keys: Vec<str>) -> Vec<str> !Net !IO {
-    if vec_len(keys) == 0 {
-        return vec_new()
-    }
-    let bk: Vec<bytes> = vec_new()
-    let mut i: i64 = 0
-    while i < vec_len(keys) {
-        vec_push(bk, bytes_of_str(vec_get(keys, i)))
-        i = i + 1
-    }
-    let r = drock_mget(db.kv, bk)?
-    if r.ok == 0 {
-        return vec_new()
-    }
     let out: Vec<str> = vec_new()
-    let mut j: i64 = 0
-    while j < vec_len(r.vals) {
-        vec_push(out, str_of_bytes(vec_get(r.vals, j)))
-        j = j + 1
+    if vec_len(keys) == 0 {
+        return out
+    }
+    let chunk = KV_CMD_MAX_ARGS() - 4
+    let mut off: i64 = 0
+    while off < vec_len(keys) {
+        let bk: Vec<bytes> = vec_new()
+        let mut i = off
+        let end = off + chunk
+        while i < vec_len(keys) && i < end {
+            vec_push(bk, bytes_of_str(vec_get(keys, i)))
+            i = i + 1
+        }
+        let r = drock_mget(db.kv, bk)?
+        if r.ok == 0 {
+            return out
+        }
+        let mut j: i64 = 0
+        while j < vec_len(r.vals) {
+            vec_push(out, str_of_bytes(vec_get(r.vals, j)))
+            j = j + 1
+        }
+        off = off + chunk
     }
     return out
 }
 
+// MSET носи по 2 аргумента на двойка — пак под 64-аргументния таван.
 fn kv_mset(db: OrmDb, keys: Vec<str>, vals: Vec<str>) -> i64 !Net !IO {
     if vec_len(keys) == 0 || vec_len(keys) != vec_len(vals) {
         return 0
     }
-    let bk: Vec<bytes> = vec_new()
-    let bv: Vec<bytes> = vec_new()
-    let mut i: i64 = 0
-    while i < vec_len(keys) {
-        vec_push(bk, bytes_of_str(vec_get(keys, i)))
-        vec_push(bv, bytes_of_str(vec_get(vals, i)))
-        i = i + 1
+    let chunk = (KV_CMD_MAX_ARGS() - 4) / 2
+    let mut off: i64 = 0
+    while off < vec_len(keys) {
+        let bk: Vec<bytes> = vec_new()
+        let bv: Vec<bytes> = vec_new()
+        let mut i = off
+        let end = off + chunk
+        while i < vec_len(keys) && i < end {
+            vec_push(bk, bytes_of_str(vec_get(keys, i)))
+            vec_push(bv, bytes_of_str(vec_get(vals, i)))
+            i = i + 1
+        }
+        let r = drock_mset(db.kv, bk, bv)?
+        if r.ok == 0 {
+            return 0
+        }
+        off = off + chunk
     }
-    let r = drock_mset(db.kv, bk, bv)?
-    return r.ok
+    return 1
 }
 
 
