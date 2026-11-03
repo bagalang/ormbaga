@@ -1,0 +1,291 @@
+// session/kv_write.baga — писане върху KV table слоя (insert/update/delete).
+//
+// Индексът се поддържа за всяка колона със стойност под KV_IX_MAX, защото
+// дълги текстове (напр. JSON настройки) никога не се търсят по равенство, а
+// биха направили ключа огромен.
+//
+// Всички ключове на един запис се пишат в един MSET — редът и индексите му
+// са атомарни спрямо читателите.
+
+import "kv.baga"
+import "kv_row.baga"
+import "db.baga"
+import "result.baga"
+import "drockb/drockb.baga"
+import "std/json/json.baga"
+import "std/bytes/bytes.baga"
+import "std/json/json_write.baga"
+import "std/str/str.baga"
+
+fn KV_IX_MAX() -> i64 { return 120 }
+
+fn kv_ix_wanted(val: str) -> i64 {
+    if val == "" {
+        return 0
+    }
+    if len(val) > KV_IX_MAX() {
+        return 0
+    }
+    return 1
+}
+
+// Събира (ключ → нов списък) за индексите на реда. `add=1` добавя id,
+// `add=0` го маха. Чете текущите списъци с един MGET.
+fn kv_ix_apply(db: OrmDb, table: str, id: str, cols: Vec<str>, vals: Vec<str>, nulls: Vec<i64>, add: i64, ks: Vec<str>, vs: Vec<str>) -> i64 !Net !IO {
+    let ikeys: Vec<str> = vec_new()
+    let mut i: i64 = 0
+    while i < vec_len(cols) {
+        if vec_get(nulls, i) == 0 {
+            let v = vec_get(vals, i)
+            if kv_ix_wanted(v) == 1 {
+                vec_push(ikeys, kv_key_ix(table, vec_get(cols, i), v))
+            }
+        }
+        i = i + 1
+    }
+    if vec_len(ikeys) == 0 {
+        return 0
+    }
+    let cur = kv_mget(db, ikeys)?
+    let mut j: i64 = 0
+    while j < vec_len(ikeys) {
+        let key = vec_get(ikeys, j)
+        let mut ids = kv_ids_parse(vec_get(cur, j))
+        if add == 1 {
+            if kv_ids_has(ids, id) == 0 {
+                vec_push(ids, id)
+            }
+        } else {
+            let kept: Vec<str> = vec_new()
+            let mut k: i64 = 0
+            while k < vec_len(ids) {
+                if vec_get(ids, k) != id {
+                    vec_push(kept, vec_get(ids, k))
+                }
+                k = k + 1
+            }
+            ids = kept
+        }
+        vec_push(ks, key)
+        if vec_len(ids) == 0 {
+            vec_push(vs, "")
+        } else {
+            vec_push(vs, kv_ids_encode(ids))
+        }
+        j = j + 1
+    }
+    return 0
+}
+
+// Разделя събраните (ключ, стойност) на MSET и DEL.
+//
+// Един ключ може да се появи два пъти — веднъж от remove-фазата (старата
+// стойност на колона) и веднъж от add-фазата (новата). Колоната id е такъв
+// случай при всеки UPDATE: remove я изпразва, add я връща. Ако просто ги
+// пуснем, MSET записва вярното, а последващото DEL го трие — редът изчезва от
+// индекса по id. Затова взимаме само ПОСЛЕДНОТО появяване на ключа.
+fn kv_split_writes(ks: Vec<str>, vs: Vec<str>, mks: Vec<str>, mvs: Vec<str>, dels: Vec<str>) {
+    let mut i: i64 = 0
+    while i < vec_len(ks) {
+        let key = vec_get(ks, i)
+        let mut last = i
+        let mut j = i + 1
+        while j < vec_len(ks) {
+            if vec_get(ks, j) == key {
+                last = j
+            }
+            j = j + 1
+        }
+        if last == i {
+            let val = vec_get(vs, i)
+            if val == "" {
+                vec_push(dels, key)
+            } else {
+                vec_push(mks, key)
+                vec_push(mvs, val)
+            }
+        }
+        i = i + 1
+    }
+}
+
+// ── insert ────────────────────────────────────────────────────────────────
+
+// Връща новия ред като OrmQuery (като INSERT … RETURNING *), за да може
+// моделът да прочете генерирания id с orm_cell_by_i64.
+fn kv_insert(db: OrmDb, table: str, cols: Vec<str>, vals: Vec<str>, nulls: Vec<i64>) -> OrmQuery !Net !IO {
+    if vec_len(cols) != vec_len(vals) || vec_len(cols) != vec_len(nulls) {
+        return kv_query_err(db, "kv_insert: cols/vals/nulls с различна дължина")
+    }
+    if orm_is_drock(db) == 0 {
+        return kv_query_err(db, "kv_insert: OrmDb не е drock backend")
+    }
+    let id = kv_incr(db, kv_key_seq(table))?
+    if id < 0 {
+        return kv_query_err(db, "kv_insert: броячът не отговаря")
+    }
+    let ids = int_to_str(id)
+    // Колона id се добавя винаги — моделите я четат.
+    let fcols: Vec<str> = vec_new()
+    let fvals: Vec<str> = vec_new()
+    let fnulls: Vec<i64> = vec_new()
+    vec_push(fcols, "id")
+    vec_push(fvals, ids)
+    vec_push(fnulls, 0)
+    let mut i: i64 = 0
+    while i < vec_len(cols) {
+        if vec_get(cols, i) != "id" {
+            vec_push(fcols, vec_get(cols, i))
+            vec_push(fvals, vec_get(vals, i))
+            vec_push(fnulls, vec_get(nulls, i))
+        }
+        i = i + 1
+    }
+    let ks: Vec<str> = vec_new()
+    let vs: Vec<str> = vec_new()
+    vec_push(ks, kv_key_row(table, id))
+    vec_push(vs, kv_build_row(fcols, fvals, fnulls))
+    vec_push(ks, kv_key_all(table))
+    let all = kv_all_ids(db, table)?
+    vec_push(all, ids)
+    vec_push(vs, kv_ids_encode(all))
+    kv_ix_apply(db, table, ids, fcols, fvals, fnulls, 1, ks, vs)?
+    // Празен низ в vs = „изтрий ключа" — филтрира се след MSET.
+    let mks: Vec<str> = vec_new()
+    let mvs: Vec<str> = vec_new()
+    let dels: Vec<str> = vec_new()
+    kv_split_writes(ks, vs, mks, mvs, dels)
+    if kv_mset(db, mks, mvs)? == 0 {
+        return kv_query_err(db, "kv_insert: MSET не мина")
+    }
+    if vec_len(dels) > 0 {
+        kv_del_many(db, dels)?
+    }
+    return kv_select_by_id(db, table, id, fcols)
+}
+
+fn kv_insert_exec(db: OrmDb, table: str, cols: Vec<str>, vals: Vec<str>, nulls: Vec<i64>) -> OrmExec !Net !IO {
+    let q = kv_insert(db, table, cols, vals, nulls)?
+    if orm_ok_q(q) == 0 {
+        return kv_exec_err(orm_db_q(q), orm_err_q(q))
+    }
+    return kv_exec_ok(orm_db_q(q), "INSERT 0 1")
+}
+
+fn kv_del_many(db: OrmDb, keys: Vec<str>) -> i64 !Net !IO {
+    let bk: Vec<bytes> = vec_new()
+    let mut i: i64 = 0
+    while i < vec_len(keys) {
+        vec_push(bk, bytes_of_str(vec_get(keys, i)))
+        i = i + 1
+    }
+    if vec_len(bk) == 0 {
+        return 0
+    }
+    let r = drock_del(db.kv, bk)?
+    if r.ok == 0 {
+        return 0
+    }
+    return r.n
+}
+
+// ── update ────────────────────────────────────────────────────────────────
+
+fn kv_update_by_id(db: OrmDb, table: str, id: i64, cols: Vec<str>, vals: Vec<str>, nulls: Vec<i64>) -> OrmExec !Net !IO {
+    if orm_is_drock(db) == 0 {
+        return kv_exec_err(db, "kv_update_by_id: OrmDb не е drock backend")
+    }
+    let old_text = kv_get(db, kv_key_row(table, id))?
+    if old_text == "" {
+        return kv_exec_err(db, concat("kv_update_by_id: няма ред ", int_to_str(id)))
+    }
+    // Старите стойности — за да се махнат от индексите.
+    let old = kv_row_cols(old_text)
+    let old_vals = kv_row_vals(old_text, old)
+    let old_nulls = kv_row_nulls(old_text, old)
+    // Новият ред: старият JSON с наложените промени.
+    let merged = kv_row_merge(old_text, cols, vals, nulls)
+    let ks: Vec<str> = vec_new()
+    let vs: Vec<str> = vec_new()
+    vec_push(ks, kv_key_row(table, id))
+    vec_push(vs, merged)
+    let ids = int_to_str(id)
+    kv_ix_apply(db, table, ids, old, old_vals, old_nulls, 0, ks, vs)?
+    let mcols = kv_row_cols(merged)
+    let mvals = kv_row_vals(merged, mcols)
+    let mnulls = kv_row_nulls(merged, mcols)
+    kv_ix_apply(db, table, ids, mcols, mvals, mnulls, 1, ks, vs)?
+    let mks: Vec<str> = vec_new()
+    let mvs: Vec<str> = vec_new()
+    let dels: Vec<str> = vec_new()
+    kv_split_writes(ks, vs, mks, mvs, dels)
+    if kv_mset(db, mks, mvs)? == 0 {
+        return kv_exec_err(db, "kv_update_by_id: MSET не мина")
+    }
+    if vec_len(dels) > 0 {
+        kv_del_many(db, dels)?
+    }
+    return kv_exec_ok(db, "UPDATE 1")
+}
+
+// ── delete ────────────────────────────────────────────────────────────────
+
+fn kv_delete_by_id(db: OrmDb, table: str, id: i64) -> OrmExec !Net !IO {
+    if orm_is_drock(db) == 0 {
+        return kv_exec_err(db, "kv_delete_by_id: OrmDb не е drock backend")
+    }
+    let old_text = kv_get(db, kv_key_row(table, id))?
+    if old_text == "" {
+        return kv_exec_ok(db, "DELETE 0")
+    }
+    let ids = int_to_str(id)
+    let old = kv_row_cols(old_text)
+    let old_vals = kv_row_vals(old_text, old)
+    let old_nulls = kv_row_nulls(old_text, old)
+    let ks: Vec<str> = vec_new()
+    let vs: Vec<str> = vec_new()
+    kv_ix_apply(db, table, ids, old, old_vals, old_nulls, 0, ks, vs)?
+    let all = kv_all_ids(db, table)?
+    let kept: Vec<str> = vec_new()
+    let mut i: i64 = 0
+    while i < vec_len(all) {
+        if vec_get(all, i) != ids {
+            vec_push(kept, vec_get(all, i))
+        }
+        i = i + 1
+    }
+    vec_push(ks, kv_key_all(table))
+    vec_push(vs, kv_ids_encode(kept))
+    let mks: Vec<str> = vec_new()
+    let mvs: Vec<str> = vec_new()
+    let dels: Vec<str> = vec_new()
+    vec_push(dels, kv_key_row(table, id))
+    kv_split_writes(ks, vs, mks, mvs, dels)
+    if kv_mset(db, mks, mvs)? == 0 {
+        return kv_exec_err(db, "kv_delete_by_id: MSET не мина")
+    }
+    if vec_len(dels) > 0 {
+        kv_del_many(db, dels)?
+    }
+    return kv_exec_ok(db, "DELETE 1")
+}
+
+
+
+
+
+// ── обвивка: UPDATE без null-флагове ─────────────────────────────────────
+//
+// Еквивалент на orm_update_by_id за KV backend-а. Не пипаме общите хелпери в
+// session/orm.baga, защото kv* ги използва за типовете OrmQuery/OrmExec —
+// обратна зависимост би затворила кръг от импорти.
+
+fn kv_update_strs(db: OrmDb, table: str, id: i64, cols: Vec<str>, vals: Vec<str>) -> OrmExec !Net !IO {
+    let nulls: Vec<i64> = vec_new()
+    let mut i: i64 = 0
+    while i < vec_len(vals) {
+        vec_push(nulls, 0)
+        i = i + 1
+    }
+    return kv_update_by_id(db, table, id, cols, vals, nulls)?
+}

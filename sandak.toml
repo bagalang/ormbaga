@@ -6,5 +6,6 @@ entry = "orm.baga"
 [dependencies]
 pgbaga = { path = "../pgbaga" }
 boilabaga = { path = "../boilabaga" }
+drockb = { path = "../drockb" }
 std = { path = "../../std" }
 bufbaga = { path = "../bufbaga" }

@@ -1,0 +1,377 @@
+// session/kv.baga — table слой върху drockb (rocksbaga).
+//
+// Защо: fmrbaga подава на хендлърите OrmDb, а bagabuch чете реда през
+// orm_cell_by/orm_nrows/orm_db_q. Този слой попълва същия OrmQuery (PgRows е
+// обикновена структура) от KV данни — затова action файловете на bagabuch
+// остават непроменени; пренаписват се само моделите.
+//
+// Ключове (стойностите са JSON, всички клетки са текст като в PG text wire):
+//   kv:t:<table>:seq                  INCR — следващ id
+//   kv:t:<table>:<id:012d>            ред {"col":"val", "nul":null}
+//   kv:t:<table>:all                  JSON масив от id-та (подреден)
+//   kv:t:<table>:ix:<col>:<val>       JSON масив от id-та (вторичен индекс)
+//
+// Индексът се поддържа за всяка колона — WHERE по която да е колона е GET,
+// не скан. Цената е повече ключове, което за LSM е евтино.
+
+import "db.baga"
+import "result.baga"
+import "kv_row.baga"
+import "drockb/drockb.baga"
+import "pgbaga/pg.baga"
+import "std/bytes/bytes.baga"
+import "std/json/json.baga"
+import "std/json/json_write.baga"
+import "std/str/str.baga"
+
+fn ORM_KV_NS() -> str { return "kv:t:" }
+
+// ── ключове ───────────────────────────────────────────────────────────────
+
+fn kv_pad12(n: i64) -> str {
+    let s = int_to_str(n)
+    let mut out = s
+    let mut i = len(s)
+    while i < 12 {
+        out = concat("0", out)
+        i = i + 1
+    }
+    return out
+}
+
+fn kv_key_row(table: str, id: i64) -> str {
+    return concat(ORM_KV_NS(), concat(table, concat(":", kv_pad12(id))))
+}
+
+fn kv_key_all(table: str) -> str {
+    return concat(ORM_KV_NS(), concat(table, ":all"))
+}
+
+fn kv_key_seq(table: str) -> str {
+    return concat(ORM_KV_NS(), concat(table, ":seq"))
+}
+
+fn kv_key_ix(table: str, col: str, val: str) -> str {
+    return concat(ORM_KV_NS(), concat(table, concat(":ix:", concat(col, concat(":", val)))))
+}
+
+// ── суров KV достъп ───────────────────────────────────────────────────────
+
+fn kv_get(db: OrmDb, key: str) -> str !Net !IO {
+    return drock_get_str(db.kv, key)?
+}
+
+fn kv_put(db: OrmDb, key: str, val: str) -> i64 !Net !IO {
+    let r = drock_put_str(db.kv, key, val)?
+    return r.ok
+}
+
+fn kv_del(db: OrmDb, key: str) -> i64 !Net !IO {
+    let r = drock_delete(db.kv, bytes_of_str(key))?
+    return r.ok
+}
+
+fn kv_incr(db: OrmDb, key: str) -> i64 !Net !IO {
+    let r = drock_incr(db.kv, bytes_of_str(key))?
+    if r.ok == 0 {
+        return 0 - 1
+    }
+    return r.n
+}
+
+fn kv_mget(db: OrmDb, keys: Vec<str>) -> Vec<str> !Net !IO {
+    if vec_len(keys) == 0 {
+        return vec_new()
+    }
+    let bk: Vec<bytes> = vec_new()
+    let mut i: i64 = 0
+    while i < vec_len(keys) {
+        vec_push(bk, bytes_of_str(vec_get(keys, i)))
+        i = i + 1
+    }
+    let r = drock_mget(db.kv, bk)?
+    if r.ok == 0 {
+        return vec_new()
+    }
+    let out: Vec<str> = vec_new()
+    let mut j: i64 = 0
+    while j < vec_len(r.vals) {
+        vec_push(out, str_of_bytes(vec_get(r.vals, j)))
+        j = j + 1
+    }
+    return out
+}
+
+fn kv_mset(db: OrmDb, keys: Vec<str>, vals: Vec<str>) -> i64 !Net !IO {
+    if vec_len(keys) == 0 || vec_len(keys) != vec_len(vals) {
+        return 0
+    }
+    let bk: Vec<bytes> = vec_new()
+    let bv: Vec<bytes> = vec_new()
+    let mut i: i64 = 0
+    while i < vec_len(keys) {
+        vec_push(bk, bytes_of_str(vec_get(keys, i)))
+        vec_push(bv, bytes_of_str(vec_get(vals, i)))
+        i = i + 1
+    }
+    let r = drock_mset(db.kv, bk, bv)?
+    return r.ok
+}
+
+
+
+
+fn kv_ids_add(db: OrmDb, key: str, id: str) -> i64 !Net !IO {
+    let ids = kv_ids_parse(kv_get(db, key)?)
+    if kv_ids_has(ids, id) == 1 {
+        return 1
+    }
+    vec_push(ids, id)
+    return kv_put(db, key, kv_ids_encode(ids))?
+}
+
+fn kv_ids_del(db: OrmDb, key: str, id: str) -> i64 !Net !IO {
+    let ids = kv_ids_parse(kv_get(db, key)?)
+    if kv_ids_has(ids, id) == 0 {
+        return 1
+    }
+    let out: Vec<str> = vec_new()
+    let mut i: i64 = 0
+    while i < vec_len(ids) {
+        if vec_get(ids, i) != id {
+            vec_push(out, vec_get(ids, i))
+        }
+        i = i + 1
+    }
+    if vec_len(out) == 0 {
+        return kv_del(db, key)?
+    }
+    return kv_put(db, key, kv_ids_encode(out))?
+}
+
+fn kv_all_ids(db: OrmDb, table: str) -> Vec<str> !Net !IO {
+    return kv_ids_parse(kv_get(db, kv_key_all(table))?)
+}
+
+fn kv_ix_ids(db: OrmDb, table: str, col: str, val: str) -> Vec<str> !Net !IO {
+    return kv_ids_parse(kv_get(db, kv_key_ix(table, col, val))?)
+}
+
+
+
+// ── OrmQuery / OrmExec / OrmCount от KV данни ─────────────────────────────
+
+fn kv_query_ok(db: OrmDb, cols: Vec<str>, cells: Vec<str>, nulls: Vec<i64>, nrows: i64) -> OrmQuery {
+    let ncols = vec_len(cols)
+    let coltypes: Vec<i64> = vec_new()
+    let mut i: i64 = 0
+    while i < ncols {
+        vec_push(coltypes, 25)   // TEXT oid — като PG text wire
+        i = i + 1
+    }
+    let rows = PgRows {
+        tag: "SELECT",
+        ncols: ncols,
+        nrows: nrows,
+        colnames: cols,
+        coltypes: coltypes,
+        cells: cells,
+        nulls: nulls,
+        tx_status: 73,           // 'I' — извън транзакция
+        conn: db.conn
+    }
+    return OrmQOk(OrmQueryOk { tag: "SELECT", nrows: nrows, ncols: ncols, result: PgOk(rows), db: db })
+}
+
+fn kv_query_empty(db: OrmDb, cols: Vec<str>) -> OrmQuery {
+    return kv_query_ok(db, cols, vec_new(), vec_new(), 0)
+}
+
+fn kv_query_err(db: OrmDb, msg: str) -> OrmQuery {
+    return OrmQErr(OrmQueryFail { err: msg, tag: "", db: db })
+}
+
+fn kv_exec_ok(db: OrmDb, tag: str) -> OrmExec {
+    return OrmEOk(OrmExecOk { tag: tag, db: db })
+}
+
+fn kv_exec_err(db: OrmDb, msg: str) -> OrmExec {
+    return OrmEErr(OrmExecFail { err: msg, tag: "", db: db })
+}
+
+fn kv_count_ok(db: OrmDb, n: i64) -> OrmCount {
+    return OrmCOk(OrmCountOk { count: n, db: db })
+}
+
+fn kv_count_err(db: OrmDb, msg: str) -> OrmCount {
+    return OrmCErr(OrmCountFail { err: msg, db: db })
+}
+
+// ── четене ────────────────────────────────────────────────────────────────
+
+fn kv_rows_to_query(db: OrmDb, table: str, ids: Vec<str>, cols: Vec<str>) -> OrmQuery !Net !IO {
+    if vec_len(ids) == 0 {
+        return kv_query_empty(db, cols)
+    }
+    let keys: Vec<str> = vec_new()
+    let mut i: i64 = 0
+    while i < vec_len(ids) {
+        vec_push(keys, kv_key_row(table, parse_int(vec_get(ids, i))))
+        i = i + 1
+    }
+    let texts = kv_mget(db, keys)?
+    let cells: Vec<str> = vec_new()
+    let nulls: Vec<i64> = vec_new()
+    let mut rows: i64 = 0
+    let mut j: i64 = 0
+    while j < vec_len(texts) {
+        if vec_get(texts, j) != "" {
+            kv_row_append(vec_get(texts, j), cols, cells, nulls)
+            rows = rows + 1
+        }
+        j = j + 1
+    }
+    return kv_query_ok(db, cols, cells, nulls, rows)
+}
+
+fn kv_select_by_id(db: OrmDb, table: str, id: i64, cols: Vec<str>) -> OrmQuery !Net !IO {
+    let text = kv_get(db, kv_key_row(table, id))?
+    if text == "" {
+        return kv_query_empty(db, cols)
+    }
+    let ids: Vec<str> = vec_new()
+    vec_push(ids, int_to_str(id))
+    return kv_rows_to_query(db, table, ids, cols)
+}
+
+fn kv_select_where(db: OrmDb, table: str, col: str, val: str, cols: Vec<str>) -> OrmQuery !Net !IO {
+    let ids = kv_ix_ids(db, table, col, val)?
+    return kv_rows_to_query(db, table, ids, cols)
+}
+
+// WHERE c1 = v1 AND c2 = v2 — сечение на двата индекса.
+fn kv_select_where2(db: OrmDb, table: str, c1: str, v1: str, c2: str, v2: str, cols: Vec<str>) -> OrmQuery !Net !IO {
+    let a = kv_ix_ids(db, table, c1, v1)?
+    let b = kv_ix_ids(db, table, c2, v2)?
+    let both: Vec<str> = vec_new()
+    let mut i: i64 = 0
+    while i < vec_len(a) {
+        if kv_ids_has(b, vec_get(a, i)) == 1 {
+            vec_push(both, vec_get(a, i))
+        }
+        i = i + 1
+    }
+    return kv_rows_to_query(db, table, both, cols)
+}
+
+fn kv_select_all(db: OrmDb, table: str, cols: Vec<str>) -> OrmQuery !Net !IO {
+    let ids = kv_all_ids(db, table)?
+    return kv_rows_to_query(db, table, ids, cols)
+}
+
+fn kv_select_page(db: OrmDb, table: str, cols: Vec<str>, limit: i64, offset: i64) -> OrmQuery !Net !IO {
+    let ids = kv_all_ids(db, table)?
+    let page: Vec<str> = vec_new()
+    let n = vec_len(ids)
+    let mut i = offset
+    if i < 0 {
+        i = 0
+    }
+    let mut taken: i64 = 0
+    while i < n {
+        if limit > 0 && taken >= limit {
+            i = n
+        } else {
+            vec_push(page, vec_get(ids, i))
+            taken = taken + 1
+            i = i + 1
+        }
+    }
+    return kv_rows_to_query(db, table, page, cols)
+}
+
+// SELECT MAX(id) — четене, не INCR: броячът държи последния раздаден id и
+// увеличаването му тук би дупкало номерацията при всяка справка.
+fn kv_max_id(db: OrmDb, table: str) -> OrmCount !Net !IO {
+    let s = kv_get(db, kv_key_seq(table))?
+    if s == "" {
+        return kv_count_ok(db, 0)
+    }
+    return kv_count_ok(db, parse_int(s))
+}
+
+fn kv_row_count(db: OrmDb, table: str) -> OrmCount !Net !IO {
+    let ids = kv_all_ids(db, table)?
+    return kv_count_ok(db, vec_len(ids))
+}
+
+// ── минимален разбор на SQL за count ──────────────────────────────────────
+//
+// bagabuch ползва само SELECT MAX(id) AS count FROM t и SELECT COUNT(*).
+// Толкова малко подмножество не оправдава SQL двигател — изваждаме таблицата
+// и връщаме брояча или броя редове.
+fn kv_sql_table(sql: str) -> str {
+    let p = str_find(sql, "FROM ")
+    if p < 0 {
+        return ""
+    }
+    let rest = substr(sql, p + 5, len(sql))
+    let mut end = len(rest)
+    let mut i: i64 = 0
+    while i < len(rest) {
+        let c = char_at(rest, i)
+        if c == 32 || c == 59 || c == 10 || c == 9 {
+            end = i
+            i = len(rest)
+        } else {
+            i = i + 1
+        }
+    }
+    return substr(rest, 0, end)
+}
+
+fn kv_count_sql(db: OrmDb, sql: str) -> OrmCount !Net !IO {
+    let table = kv_sql_table(sql)
+    if table == "" {
+        return kv_count_err(db, "kv_count_sql: не намерих FROM в SQL-а")
+    }
+    if str_find(sql, "MAX(id)") >= 0 {
+        return kv_max_id(db, table)?
+    }
+    return kv_row_count(db, table)?
+}
+
+// ── сортиране (заменя ORDER BY) ───────────────────────────────────────────
+
+fn kv_sort_idx(keys: Vec<str>, order: Vec<i64>) {
+    let n = vec_len(order)
+    let mut i: i64 = 1
+    while i < n {
+        let oi = vec_get(order, i)
+        let ki = vec_get(keys, oi)
+        let mut j = i - 1
+        let mut stop: i64 = 0
+        while j >= 0 && stop == 0 {
+            let oj = vec_get(order, j)
+            if kv_strcmp(vec_get(keys, oj), ki) > 0 {
+                vec_set(order, j + 1, oj)
+                j = j - 1
+            } else {
+                stop = 1
+            }
+        }
+        vec_set(order, j + 1, oi)
+        i = i + 1
+    }
+}
+
+fn kv_strcmp(a: str, b: str) -> i64 {
+    if a == b {
+        return 0
+    }
+    if a < b {
+        return 0 - 1
+    }
+    return 1
+}
+

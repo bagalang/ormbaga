@@ -1,0 +1,218 @@
+// kv_row.baga — чисти помощници върху JSON реда (без OrmDb).
+//
+// Отделен модул, защото и kv.baga (четене), и kv_write.baga (писане) ги
+// ползват — иначе двата се завързват в цикъл от импорти.
+
+import "std/json/json.baga"
+import "std/json/json_write.baga"
+import "std/str/str.baga"
+
+// ── JSON списъци от id-та ─────────────────────────────────────────────────
+
+fn kv_ids_parse(s: str) -> Vec<str> {
+    if s == "" {
+        return vec_new()
+    }
+    let d = json_parse(s)
+    if json_tag(d, json_root(d)) != 5 {
+        return vec_new()
+    }
+    let n = json_count(d, json_root(d))
+    let out: Vec<str> = vec_new()
+    let mut i: i64 = 0
+    while i < n {
+        let node = json_at(d, json_root(d), i)
+        if json_tag(d, node) == 4 {
+            vec_push(out, json_str(d, node))
+        }
+        i = i + 1
+    }
+    return out
+}
+
+fn kv_ids_encode(ids: Vec<str>) -> str {
+    let mut s = "["
+    let mut i: i64 = 0
+    while i < vec_len(ids) {
+        if i > 0 {
+            s = concat(s, ",")
+        }
+        s = concat(s, json_escape(vec_get(ids, i)))
+        i = i + 1
+    }
+    return concat(s, "]")
+}
+
+fn kv_ids_has(ids: Vec<str>, id: str) -> i64 {
+    let mut i: i64 = 0
+    while i < vec_len(ids) {
+        if vec_get(ids, i) == id {
+            return 1
+        }
+        i = i + 1
+    }
+    return 0
+}
+
+// ── ред като JSON ─────────────────────────────────────────────────────────
+
+fn kv_build_row(cols: Vec<str>, vals: Vec<str>, nulls: Vec<i64>) -> str {
+    let mut s = "{"
+    let mut i: i64 = 0
+    while i < vec_len(cols) {
+        if i > 0 {
+            s = concat(s, ",")
+        }
+        s = concat(s, concat(json_escape(vec_get(cols, i)), ":"))
+        if vec_get(nulls, i) == 1 {
+            s = concat(s, "null")
+        } else {
+            s = concat(s, json_escape(vec_get(vals, i)))
+        }
+        i = i + 1
+    }
+    return concat(s, "}")
+}
+
+// Добавя ред към cells/nulls (row-major, както PgRows ги очаква).
+fn kv_row_append(json_text: str, cols: Vec<str>, cells: Vec<str>, nulls: Vec<i64>) {
+    let d = json_parse(json_text)
+    let root = json_root(d)
+    if json_tag(d, root) != 6 {
+        let mut i: i64 = 0
+        while i < vec_len(cols) {
+            vec_push(cells, "")
+            vec_push(nulls, 1)
+            i = i + 1
+        }
+        return
+    }
+    let mut j: i64 = 0
+    while j < vec_len(cols) {
+        let name = vec_get(cols, j)
+        let n = json_get(d, root, name)
+        if n < 0 || json_tag(d, n) == 0 {
+            vec_push(cells, "")
+            vec_push(nulls, 1)
+        } else {
+            if json_tag(d, n) == 4 {
+                vec_push(cells, json_str(d, n))
+            } else {
+                vec_push(cells, json_serialize(d, n))
+            }
+            vec_push(nulls, 0)
+        }
+        j = j + 1
+    }
+}
+
+// ── SELECT * (колоните се извеждат от редовете) ───────────────────────────
+//
+// Общият table API в session/orm.baga (orm_all/orm_find_i64/orm_where_eq_str)
+// не носи списък с колони — SQL-ът е SELECT *. В KV колоните са ключовете на
+// JSON реда, затова ги събираме от прочетените редове (id винаги първа, за да
+// е стабилен редът). Така моделите, които ползват само общия API, не се пипат.
+
+fn kv_cols_of(texts: Vec<str>) -> Vec<str> {
+    let out: Vec<str> = vec_new()
+    vec_push(out, "id")
+    let mut i: i64 = 0
+    while i < vec_len(texts) {
+        let cs = kv_row_cols(vec_get(texts, i))
+        let mut j: i64 = 0
+        while j < vec_len(cs) {
+            let name = vec_get(cs, j)
+            if kv_ids_has(out, name) == 0 {
+                vec_push(out, name)
+            }
+            j = j + 1
+        }
+        i = i + 1
+    }
+    return out
+}
+
+// ── helpers върху JSON реда ───────────────────────────────────────────────
+
+fn kv_row_cols(text: str) -> Vec<str> {
+    let out: Vec<str> = vec_new()
+    let d = json_parse(text)
+    let root = json_root(d)
+    if json_tag(d, root) != 6 {
+        return out
+    }
+    let n = json_count(d, root)
+    let mut i: i64 = 0
+    while i < n {
+        vec_push(out, json_key(d, root, i))
+        i = i + 1
+    }
+    return out
+}
+
+fn kv_row_vals(text: str, cols: Vec<str>) -> Vec<str> {
+    let out: Vec<str> = vec_new()
+    let d = json_parse(text)
+    let root = json_root(d)
+    let mut i: i64 = 0
+    while i < vec_len(cols) {
+        let n = json_get(d, root, vec_get(cols, i))
+        if n < 0 || json_tag(d, n) == 0 {
+            vec_push(out, "")
+        } else {
+            if json_tag(d, n) == 4 {
+                vec_push(out, json_str(d, n))
+            } else {
+                vec_push(out, json_serialize(d, n))
+            }
+        }
+        i = i + 1
+    }
+    return out
+}
+
+fn kv_row_nulls(text: str, cols: Vec<str>) -> Vec<i64> {
+    let out: Vec<i64> = vec_new()
+    let d = json_parse(text)
+    let root = json_root(d)
+    let mut i: i64 = 0
+    while i < vec_len(cols) {
+        let n = json_get(d, root, vec_get(cols, i))
+        if n < 0 || json_tag(d, n) == 0 {
+            vec_push(out, 1)
+        } else {
+            vec_push(out, 0)
+        }
+        i = i + 1
+    }
+    return out
+}
+
+// Старият JSON с наложени промени; `nulls=1` записва JSON null.
+fn kv_row_merge(old_text: str, cols: Vec<str>, vals: Vec<str>, nulls: Vec<i64>) -> str {
+    let names = kv_row_cols(old_text)
+    let old_vals = kv_row_vals(old_text, names)
+    let old_nulls = kv_row_nulls(old_text, names)
+    let mut i: i64 = 0
+    while i < vec_len(cols) {
+        let name = vec_get(cols, i)
+        let mut hit: i64 = 0 - 1
+        let mut k: i64 = 0
+        while k < vec_len(names) {
+            if vec_get(names, k) == name {
+                hit = k
+            }
+            k = k + 1
+        }
+        if hit < 0 {
+            vec_push(names, name)
+            vec_push(old_vals, vec_get(vals, i))
+            vec_push(old_nulls, vec_get(nulls, i))
+        } else {
+            vec_set(old_vals, hit, vec_get(vals, i))
+            vec_set(old_nulls, hit, vec_get(nulls, i))
+        }
+        i = i + 1
+    }
+    return kv_build_row(names, old_vals, old_nulls)
+}

@@ -1,3 +1,13 @@
 // Public re-export — prefer ormbaga/session/orm.baga for new code.
 // Stable path: import "ormbaga/orm.baga"
+//
+// session/db       — OrmDb сесията и изборът на backend (PG wire или drock).
+// session/result   — типовете OrmQuery/OrmExec/OrmCount + accessor-ите.
+// session/kv_row   — чисти помощници върху JSON реда.
+// session/kv*      — table слой върху drockb (rocksbaga); ORM_BACKEND=drock.
+import "session/db.baga"
+import "session/result.baga"
+import "session/kv_row.baga"
+import "session/kv.baga"
+import "session/kv_write.baga"
 import "session/orm.baga"

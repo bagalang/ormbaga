@@ -1,0 +1,213 @@
+// result.baga — типовете резултат (OrmQuery/OrmExec/OrmCount) и accessor-ите.
+//
+// Извадени от session/orm.baga, за да може session/kv* да ги ползва без цикъл
+// от импорти: kv.baga строи OrmQuery от KV данни, а общият table API в orm.baga
+// се разклонява към kv — и двете зависят от тези типове, не едно от друго.
+
+import "db.baga"
+import "pgbaga/pg.baga"
+import "std/str/str.baga"
+
+// ---------- result wrappers (B1 L3 — carry updated db) ----------
+// Prefer orm_ok / orm_db_* / orm_nrows helpers; no ok:i64 stand-in fields.
+
+struct OrmExecOk {
+    tag: str,
+    db: OrmDb
+}
+
+struct OrmExecFail {
+    err: str,
+    tag: str,
+    db: OrmDb
+}
+
+enum OrmExec {
+    OrmEOk(OrmExecOk),
+    OrmEErr(OrmExecFail)
+}
+
+struct OrmQueryOk {
+    tag: str,
+    nrows: i64,
+    ncols: i64,
+    result: PgResult,
+    db: OrmDb
+}
+
+struct OrmQueryFail {
+    err: str,
+    tag: str,
+    db: OrmDb
+}
+
+enum OrmQuery {
+    OrmQOk(OrmQueryOk),
+    OrmQErr(OrmQueryFail)
+}
+
+struct OrmCountOk {
+    count: i64,
+    db: OrmDb
+}
+
+struct OrmCountFail {
+    err: str,
+    db: OrmDb
+}
+
+enum OrmCount {
+    OrmCOk(OrmCountOk),
+    OrmCErr(OrmCountFail)
+}
+
+fn orm_ok(r: OrmExec) -> i64 {
+    return match r {
+        OrmEOk(_u1) => 1,
+        OrmEErr(_u2) => 0,
+    }
+}
+
+fn orm_err_exec(r: OrmExec) -> str {
+    return match r {
+        OrmEOk(_u3) => "",
+        OrmEErr(e) => e.err,
+    }
+}
+
+// SQLSTATE from pg_error_fields shape "SEV|SQLSTATE|message". "" if none.
+fn orm_sqlstate(r: OrmExec) -> str {
+    let e = orm_err_exec(r)
+    let i1 = str_find(e, "|")
+    if i1 < 0 {
+        return ""
+    }
+    let rest = substr(e, i1 + 1, len(e))
+    let i2 = str_find(rest, "|")
+    if i2 < 0 {
+        return rest
+    }
+    return substr(rest, 0, i2)
+}
+
+fn orm_tag(r: OrmExec) -> str {
+    return match r {
+        OrmEOk(x) => x.tag,
+        OrmEErr(e) => e.tag,
+    }
+}
+
+fn orm_db_exec(r: OrmExec) -> OrmDb {
+    return match r {
+        OrmEOk(x) => x.db,
+        OrmEErr(e) => e.db,
+    }
+}
+
+fn orm_ok_q(q: OrmQuery) -> i64 {
+    return match q {
+        OrmQOk(_u4) => 1,
+        OrmQErr(_u5) => 0,
+    }
+}
+
+fn orm_err_q(q: OrmQuery) -> str {
+    return match q {
+        OrmQOk(_u6) => "",
+        OrmQErr(e) => e.err,
+    }
+}
+
+fn orm_db_q(q: OrmQuery) -> OrmDb {
+    return match q {
+        OrmQOk(x) => x.db,
+        OrmQErr(e) => e.db,
+    }
+}
+
+fn orm_nrows(q: OrmQuery) -> i64 {
+    return match q {
+        OrmQOk(x) => x.nrows,
+        OrmQErr(_u7) => 0,
+    }
+}
+
+fn orm_ncols(q: OrmQuery) -> i64 {
+    return match q {
+        OrmQOk(x) => x.ncols,
+        OrmQErr(_u8) => 0,
+    }
+}
+
+fn orm_result_err_from(e: OrmQueryFail) -> PgResult {
+    let edb = e.db
+    return pg_result_err(edb.conn, e.err)
+}
+
+fn orm_result(q: OrmQuery) -> PgResult {
+    return match q {
+        OrmQOk(x) => x.result,
+        OrmQErr(e) => orm_result_err_from(e),
+    }
+}
+
+fn orm_ok_c(c: OrmCount) -> i64 {
+    return match c {
+        OrmCOk(_u9) => 1,
+        OrmCErr(_u10) => 0,
+    }
+}
+
+fn orm_err_c(c: OrmCount) -> str {
+    return match c {
+        OrmCOk(_u11) => "",
+        OrmCErr(e) => e.err,
+    }
+}
+
+fn orm_count_n(c: OrmCount) -> i64 {
+    return match c {
+        OrmCOk(x) => x.count,
+        OrmCErr(_u12) => 0,
+    }
+}
+
+fn orm_db_c(c: OrmCount) -> OrmDb {
+    return match c {
+        OrmCOk(x) => x.db,
+        OrmCErr(e) => e.db,
+    }
+}
+
+fn orm_exec_from(r: PgResult) -> OrmExec {
+    // Use accessors (not match-bind + field copy) so conn/tag stay consistent.
+    if pg_ok(r) == 1 {
+        return OrmEOk(OrmExecOk {
+            tag: pg_tag(r),
+            db: OrmDb { conn: pg_conn_of(r), kv: drock_db_bad(""), backend: ORM_BE_PG() }
+        })
+    }
+    return OrmEErr(OrmExecFail {
+        err: pg_err(r),
+        tag: pg_tag(r),
+        db: OrmDb { conn: pg_conn_of(r), kv: drock_db_bad(""), backend: ORM_BE_PG() }
+    })
+}
+
+fn orm_query_from(r: PgResult) -> OrmQuery {
+    if pg_ok(r) == 1 {
+        return OrmQOk(OrmQueryOk {
+            tag: pg_tag(r),
+            nrows: pg_nrows(r),
+            ncols: pg_ncols(r),
+            result: r,
+            db: OrmDb { conn: pg_conn_of(r), kv: drock_db_bad(""), backend: ORM_BE_PG() }
+        })
+    }
+    return OrmQErr(OrmQueryFail {
+        err: pg_err(r),
+        tag: pg_tag(r),
+        db: OrmDb { conn: pg_conn_of(r), kv: drock_db_bad(""), backend: ORM_BE_PG() }
+    })
+}
+

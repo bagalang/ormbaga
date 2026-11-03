@@ -1,0 +1,93 @@
+// db.baga — OrmDb сесията: backend избор, конструктори, затваряне.
+//
+// Извадено от session/orm.baga, за да остане под глобалния gate от 600 реда.
+// Двата backend-а споделят един и същи тип OrmDb, защото fmrbaga подава
+// OrmDb на всеки хендлър — приложението не трябва да знае кое отдолу седи.
+
+import "pgbaga/pg.baga"
+import "drockb/drockb.baga"
+import "std/str/str.baga"
+import "std/os/os.baga"
+
+// ---------- session ----------
+
+// backend: 0 = PG wire (Postgres или boilaDB), 1 = drock (rocksbaga KV).
+// PG пътът държи жив socket в conn и нежив handle в kv; drock пътът — обратното.
+struct OrmDb {
+    conn: PgConn,
+    kv: DrokDB,
+    backend: i64
+}
+
+fn ORM_BE_PG() -> i64 { return 0 }
+fn ORM_BE_DROCK() -> i64 { return 1 }
+
+fn orm_db_bad(err: str) -> OrmDb {
+    return OrmDb { conn: pg_conn_bad(err), kv: drock_db_bad(err), backend: ORM_BE_PG() }
+}
+
+// Wrap an existing PgConn (Postgres or boilaDB over PG wire).
+fn orm_from_conn(c: PgConn) -> OrmDb {
+    return OrmDb { conn: c, kv: drock_db_bad(""), backend: ORM_BE_PG() }
+}
+
+// Обвива жив DrokDB (rocksbaga). conn е нежив — само за да стои типът цял.
+fn orm_from_drock(k: DrokDB) -> OrmDb {
+    return OrmDb { conn: pg_conn_bad(""), kv: k, backend: ORM_BE_DROCK() }
+}
+
+fn orm_is_drock(db: OrmDb) -> i64 {
+    if db.backend == ORM_BE_DROCK() {
+        return 1
+    }
+    return 0
+}
+
+fn orm_connect(host: str, port: i64, user: str, password: str, database: str) -> OrmDb !Net !IO !Random {
+    let c = pg_connect(host, port, user, password, database)?
+    return orm_from_conn(c)
+}
+
+// rocksbaga (RESP2) като backend. Няма user/password/database — KV сървърът
+// е без автентикация; DROCK_HOST/DROCK_PORT носят адреса.
+fn orm_connect_drock(host: str, port: i64) -> OrmDb !Net !IO {
+    let k = drock_open(host, port)?
+    if drock_ok(k) == 0 {
+        return orm_db_bad(drock_last_error(k))
+    }
+    return orm_from_drock(k)
+}
+
+fn orm_connect_drock_env() -> OrmDb !Net !IO {
+    let mut h = env("DROCK_HOST")?
+    if h == "" {
+        h = "127.0.0.1"
+    }
+    let mut p = parse_int(env("DROCK_PORT")?)
+    if p < 1 || p > 65535 {
+        p = 16579
+    }
+    return orm_connect_drock(h, p)?
+}
+
+fn orm_close(db: OrmDb) -> i64 !IO !Net {
+    if orm_is_drock(db) == 1 {
+        return drock_close(db.kv)?
+    }
+    return pg_close(db.conn)?
+}
+
+fn orm_ok_db(db: OrmDb) -> i64 {
+    if orm_is_drock(db) == 1 {
+        return drock_ok(db.kv)
+    }
+    return db.conn.ok
+}
+
+fn orm_err_db(db: OrmDb) -> str {
+    if orm_is_drock(db) == 1 {
+        return drock_last_error(db.kv)
+    }
+    return db.conn.err
+}
+
