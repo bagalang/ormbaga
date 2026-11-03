@@ -1,0 +1,118 @@
+// kv_migrate.baga — версионирани миграции върху KV таблици.
+//
+// Защо е нужно: счетоводната промяна (закон, ДДС ставка, ново задължително
+// поле, SAF-T версия) често иска да преизчисли или допълни вече съществуващи
+// редове. В SQL това е ALTER TABLE ADD COLUMN с default; в KV няма DDL,
+// затова миграцията е обхождане на таблицата с един MSET на ред.
+//
+// Добавянето на колона е БЕЗПЛАТНО и НЕ е миграция: редът получава ключа
+// при следващия запис, а старите редове се четат като "" (нула). Миграция е
+// само когато старите редове трябва да се ПРЕИЗЧИСЛЯТ или преоформят.
+//
+// Версията се пази на таблица (не на приложението), защото една таблица може
+// да се промени независно от другите.
+
+import "db.baga"
+import "result.baga"
+import "kv.baga"
+import "kv_write.baga"
+import "std/str/str.baga"
+import "std/time/time.baga"
+
+fn kv_mig_key(table: str) -> str {
+    return concat("kv:mig:", table)
+}
+
+fn kv_mig_version(db: OrmDb, table: str) -> i64 !Net !IO {
+    let s = kv_get(db, kv_mig_key(table))?
+    if s == "" {
+        return 0
+    }
+    return parse_int(s)
+}
+
+fn kv_mig_set(db: OrmDb, table: str, v: i64) -> i64 !Net !IO {
+    return kv_put(db, kv_mig_key(table), int_to_str(v))?
+}
+
+struct KvMigration {
+    table: str,
+    version: i64,
+    label: str,
+    // Приема (db, таблица, cols, vals, nulls, id) — променя cols/vals/nulls на
+    // място и връща 1, ако е променил реда (тогава се записва).
+    apply: fn(OrmDb, str, Vec<str>, Vec<str>, Vec<i64>, str) -> i64 !Net !IO !Time
+}
+
+struct KvMigrations {
+    items: Vec<KvMigration>
+}
+
+fn kv_migrations_new() -> KvMigrations {
+    return KvMigrations { items: vec_new() }
+}
+
+fn kv_migrations_add(m: KvMigrations, table: str, version: i64, label: str, apply: fn(OrmDb, str, Vec<str>, Vec<str>, Vec<i64>, str) -> i64 !Net !IO !Time) -> KvMigrations {
+    vec_push(m.items, KvMigration { table: table, version: version, label: label, apply: apply })
+    return m
+}
+
+fn kv_migrations_len(m: KvMigrations) -> i64 {
+    return vec_len(m.items)
+}
+
+// Връща броя приложени миграции.
+fn kv_migrate_run(db: OrmDb, m: KvMigrations) -> i64 !Net !IO !Time {
+    let mut applied: i64 = 0
+    let mut i: i64 = 0
+    while i < kv_migrations_len(m) {
+        let mig = vec_get(m.items, i)
+        let cur = kv_mig_version(db, mig.table)?
+        if cur < mig.version {
+            let changed = kv_migrate_one(db, mig)?
+            kv_mig_set(db, mig.table, mig.version)?
+            print(concat(concat("kv migrate ", mig.table), concat(" v", concat(int_to_str(cur), concat(" -> ", concat(int_to_str(mig.version), concat(" (", concat(mig.label, concat("): променени редове ", int_to_str(changed))))))))))
+            applied = applied + 1
+        }
+        i = i + 1
+    }
+    return applied
+}
+
+fn kv_migrate_one(db: OrmDb, mig: KvMigration) -> i64 !Net !IO !Time {
+    let q = kv_all_star(db, mig.table)?
+    let nrows = orm_nrows(q)
+    if nrows == 0 {
+        return 0
+    }
+    let ncols = orm_ncols(q)
+    let cols: Vec<str> = vec_new()
+    let mut c: i64 = 0
+    while c < ncols {
+        vec_push(cols, orm_colname(q, c))
+        c = c + 1
+    }
+    let mut changed: i64 = 0
+    let mut r: i64 = 0
+    while r < nrows {
+        let vals: Vec<str> = vec_new()
+        let nulls: Vec<i64> = vec_new()
+        let mut k: i64 = 0
+        while k < ncols {
+            vec_push(vals, orm_cell(q, r, k))
+            vec_push(nulls, orm_isnull(q, r, k))
+            k = k + 1
+        }
+        let id = orm_cell_by(q, r, "id")
+        let touched = mig.apply(db, mig.table, cols, vals, nulls, id)?
+        if touched == 1 {
+            let w = kv_update_by_id(db, mig.table, parse_int(id), cols, vals, nulls)?
+            if orm_ok(w) == 0 {
+                return 0 - 1
+            }
+            changed = changed + 1
+        }
+        r = r + 1
+    }
+    return changed
+}

@@ -356,37 +356,13 @@ fn orm_deallocate(db: OrmDb, name: str) -> OrmExec !IO !Net {
     return orm_exec_from(r)
 }
 
-// ---------- row accessors (thin wrappers) ----------
-
-fn orm_cell(q: OrmQuery, row: i64, col: i64) -> str {
-    return pg_cell(orm_result(q), row, col)
-}
 
 fn orm_cell_i64(q: OrmQuery, row: i64, col: i64) -> i64 {
     return pg_cell_i64(orm_result(q), row, col)
 }
 
-fn orm_isnull(q: OrmQuery, row: i64, col: i64) -> i64 {
-    return pg_isnull(orm_result(q), row, col)
-}
 
-fn orm_colname(q: OrmQuery, col: i64) -> str {
-    return pg_colname(orm_result(q), col)
-}
 
-// Find column index by name; -1 if missing.
-fn orm_col_index(q: OrmQuery, name: str) -> i64 {
-    let mut i: i64 = 0
-    let nc = orm_ncols(q)
-    let res = orm_result(q)
-    while i < nc {
-        if pg_colname(res, i) == name {
-            return i
-        }
-        i = i + 1
-    }
-    return -1
-}
 
 fn orm_cell_by(q: OrmQuery, row: i64, name: str) -> str {
     let i = orm_col_index(q, name)
