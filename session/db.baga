@@ -53,8 +53,12 @@ fn orm_connect(host: str, port: i64, user: str, password: str, database: str) ->
 
 // rocksbaga (RESP2) като backend. Няма user/password/database — KV сървърът
 // е без автентикация; DROCK_HOST/DROCK_PORT носят адреса.
+// auto_reconnect: рестартът на rocksbaga (или мрежов срив) не легена работниците
+// — drockb възстановява връзката при следваща команда.
 fn orm_connect_drock(host: str, port: i64) -> OrmDb !Net !IO {
-    let k = drock_open(host, port)?
+    let mut opts = drock_options_default()
+    opts.auto_reconnect = 1
+    let k = drock_open_with(opts, host, port)?
     if drock_ok(k) == 0 {
         return orm_db_bad(drock_last_error(k))
     }
@@ -80,9 +84,12 @@ fn orm_close(db: OrmDb) -> i64 !IO !Net {
     return pg_close(db.conn)?
 }
 
+// drock: връзката е "самозалечваща" — drockb я възстановява при първата
+// команда (auto_reconnect), затова флагът ok не е причина за 503 преди опит.
+// Мъртвата връзка се вижда като грешка от самата команда, не като 503 тук.
 fn orm_ok_db(db: OrmDb) -> i64 {
     if orm_is_drock(db) == 1 {
-        return drock_ok(db.kv)
+        return 1
     }
     return db.conn.ok
 }
